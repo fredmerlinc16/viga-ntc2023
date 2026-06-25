@@ -100,7 +100,7 @@ for idx, ap in enumerate(st.session_state.apoyos):
     apoyos_procesados.append({"posicion": pos, "tipo": tipo})
 
 
-# --- SOLVER ESTRUCTURAL MATRICIAL (EXTRACCIÓN SANITIZADA SIN FUERZA AXIAL) ---
+# --- SOLVER ESTRUCTURAL MATRICIAL (EXTRACCIÓN SANITIZADA SIN CLAVE 'N') ---
 puntos_sistema = sorted(list(set([0.0, L_total] + [ap["posicion"] for ap in apoyos_procesados])))
 ss = SystemElements()
 for i in range(len(puntos_sistema)-1):
@@ -117,7 +117,7 @@ for el_id in range(1, len(puntos_sistema)):
 
 ss.solve()
 
-# Extracción segura: solo leemos Momento (M) y Cortante (Q) que sí existen en flexión plana
+# Extracción de resultados blindada: solo leemos Momento (M) y Cortante (Q)
 M_list = []
 Q_list = []
 for el_id in range(1, len(puntos_sistema)):
@@ -127,7 +127,7 @@ for el_id in range(1, len(puntos_sistema)):
     if 'Q' in res:
         Q_list.extend(res['Q'])
 
-# Salvaguarda por si las listas inician vacías
+# Cálculo seguro de los máximos mecánicos
 Mu_max = max(abs(np.array(M_list))) * 100000 if len(M_list) > 0 else 0.1
 Vu_max = max(abs(np.array(Q_list))) * 1000   if len(Q_list) > 0 else 0.1
 
@@ -239,7 +239,7 @@ else:
     espacio_libre_inf = espacio_disponible
 
 
-# --- PESTAÑAS RENDERIZADAS ---
+# --- DISPOSICIÓN DE PESTAÑAS ---
 t1, t2, t3 = st.tabs(["🚀 Control Sísmico y Criterio 1.33Mu", "📈 Análisis de Canales", "🧱 Detalle y Bastones Dobles"])
 
 with t1:
