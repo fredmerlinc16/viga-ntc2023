@@ -26,7 +26,7 @@ fc = st.sidebar.number_input("f'c - Resistencia Concreto (kg/cm²)", value=250, 
 fy = st.sidebar.number_input("fy - Acero Longitudinal (kg/cm²)", value=4200, step=100)
 fyv = st.sidebar.number_input("fyv - Acero de Estribos (kg/cm²)", value=4200, step=100)
 
-# REQUERIMIENTO: Factor de Comportamiento Sísmico Q
+# Factor de Comportamiento Sísmico Q
 Q_sismo = st.sidebar.selectbox("Factor de Comportamiento Sísmico (Q)", [2, 3, 4], index=0)
 
 FR_flexion = 0.90
@@ -100,7 +100,7 @@ for idx, ap in enumerate(st.session_state.apoyos):
     apoyos_procesados.append({"posicion": pos, "tipo": tipo})
 
 
-# --- SOLVER ESTRUCTURAL MATRICIAL ---
+# --- SOLVER ESTRUCTURAL MATRICIAL (EXTRACCIÓN SANITIZADA Y CORREGIDA) ---
 puntos_sistema = sorted(list(set([0.0, L_total] + [ap["posicion"] for ap in apoyos_procesados])))
 ss = SystemElements()
 for i in range(len(puntos_sistema)-1):
@@ -117,8 +117,16 @@ for el_id in range(1, len(puntos_sistema)):
 
 ss.solve()
 
-Mu_max = max(abs(np.array(ss.get_element_results(element_id=1)['M']))) * 100000 
-Vu_max = max(abs(np.array(ss.get_element_results(element_id=1)['Q']))) * 1000   
+# Extracción robusta de los arreglos numéricos de esfuerzos sin colisiones por llaves
+M_list = []
+Q_list = []
+for el_id in range(1, len(puntos_sistema)):
+    res = ss.get_element_results(element_id=el_id)
+    M_list.extend(res['M'])
+    Q_list.extend(res['Q'])
+
+Mu_max = max(abs(np.array(M_list))) * 100000 # Convierte a kg-cm
+Vu_max = max(abs(np.array(Q_list))) * 1000   # Convierte a kg
 
 
 # --- LÍMITES DE ACERO DINÁMICOS POR SISMICIDAD Q (NTC 2023) ---
@@ -132,14 +140,14 @@ if Q_sismo == 2:
     rho_max = 0.75 * rho_b
 elif Q_sismo == 3:
     rho_max = 0.50 * rho_b  
-else:
+else: 
     rho_max = 0.35 * rho_b  
 
 as_max = rho_max * b * d
 
 
 # --- MOMENTO RESISTENTE REAL ---
-a_real = ((as_inf_total_colocado - as_sup_total_colocado) * fy) / (0.85 * fc * b)
+a_real = ((as_inf_total_colocado - as_sup_total_colocado) * fy) / (0.85 * fc * b) if (as_inf_total_colocado - as_sup_total_colocado) > 0 else 0.1
 MR = 0.90 * ((as_inf_total_colocado - as_sup_total_colocado) * fy * (d - a_real / 2) + as_sup_total_colocado * fy * (d - rec))
 
 
@@ -155,7 +163,7 @@ else:
     as_min_final = as_min_formula
 
 
-# --- OPTIMIZACIÓN AUTOMÁTICA CON FILTRO Q Y REGLA DE 3 VARILLAS ---
+# --- OPTIMIZACIÓN AUTOMÁTICA CON FILTRO Q Y REGLA DE MAX 3 VARILLAS ---
 opciones_validas = []
 for nombre_varilla, prop in VARILLAS.items():
     for n_barras in range(1, 4): 
@@ -179,22 +187,20 @@ if not df_optimo.empty:
     df_optimo = df_optimo.sort_values(by="Peso (kg/m)").reset_index(drop=True)
     mejor_armado_texto = df_optimo.iloc[0]["Configuración"]
 else:
-    mejor_armado_texto = "Ajustar dimensiones. El factor Q restringe la cuantía máxima."
+    mejor_armado_texto = "Ajustar dimensiones. El factor Q o el tope de 3 barras limita las opciones directas."
 
 
 # --- LONGITUD DE DESARROLLO NORMATIVA (ld) Y CORTE DE PLANOS DE OBRA ---
 db_bast_sup = VARILLAS[v_bast_sup_tipo]["diametro"] if activar_bastones_sup else 1.0
 ld_sup = max((0.06 * db_bast_sup * fy) / math.sqrt(fc), 0.004 * db_bast_sup * fy, 30.0)
-# Regla de los cuartos constructiva en taller para momento negativo + gancho estándar a 90° si es empotrado exterior
 longitud_plano_sup = max((L_total / 4) * 100, ld_sup)
 
 db_bast_inf = VARILLAS[v_bast_inf_tipo]["diametro"] if activar_bastones_inf else 1.0
 ld_inf = max((0.06 * db_bast_inf * fy) / math.sqrt(fc), 0.004 * db_bast_inf * fy, 30.0)
-# Regla constructiva para momento positivo central (60% del claro)
 longitud_plano_inf = max((L_total * 0.60) * 100, ld_inf)
 
 
-# --- DEFLEXIÓN DE BRANSON CON RESOLUCIÓN DE EJE NEUTRO EXACTO ---
+# --- DEFLEXIÓN DE BRANSON CON RESOLUCIÓN DE EJE NEUTRO EXACTO (CUADRÁTICA) ---
 Ig = (b * h**3) / 12
 fr = 2.0 * math.sqrt(fc)
 yt = h / 2
@@ -202,15 +208,17 @@ Mcr = (fr * Ig) / yt
 Ma = Mu_max / 1.3
 
 n_rel = 2000000 / (14000 * math.sqrt(fc))
-rho_real_inf = as_inf_total_colocado / (b * d)
+rho_real_inf = as_inf_total_colocado / (b * d) if (b * d) > 0 else 0.01
 
-# Solución analítica cuadrática del eje neutro agrietado (k)
+# Ecuación cuadrática exacta para profundidad del eje neutro agrietado (k)
 k_exacto = math.sqrt((rho_real_inf * n_rel)**2 + 2 * rho_real_inf * n_rel) - (rho_real_inf * n_rel)
 Icr_exacto = (b * (k_exacto * d)**3) / 3 + n_rel * as_inf_total_colocado * (d - k_exacto * d)**2
 
 Ie = min(((Mcr / Ma)**3) * Ig + (1 - (Mcr / Ma)**3) * Icr_exacto, Ig) if Ma > Mcr else Ig
-flecha_servicio_inst = (5 * ((w_cm + w_cv)*10) * (L_total*100)**4) / (384 * (14000 * math.sqrt(fc)) * Ie)
-flecha_diferida_total = flecha_servicio_inst * (1 + (2.0 / (1 + 50 * (as_sup_total_colocado/(b*d)))))
+E_c = 14000 * math.sqrt(fc)
+flecha_servicio_inst = (5 * ((w_cm + w_cv)*10) * (L_total*100)**4) / (384 * E_c * Ie)
+rho_prime = as_sup_total_colocado / (b * d) if (b * d) > 0 else 0.01
+flecha_diferida_total = flecha_servicio_inst * (1 + (2.0 / (1 + 50 * rho_prime)))
 flecha_permisible = (L_total * 100) / 240
 
 
@@ -228,7 +236,7 @@ else:
 
 # --- VALIDACIÓN CONSTRUCTIVA: ESPACIO LIBRE PARA CONCRETO (GRAVA 3/4") ---
 num_varillas_capa_inf = v_inf_num + (v_bast_inf_num if activar_bastones_inf else 0)
-espacio_disponible = b - (2 * rec) - (2 * 0.95) # Restando recubrimientos y estribos de 3/8"
+espacio_disponible = b - (2 * rec) - (2 * 0.95) 
 diametro_varilla_max_inf = VARILLAS[v_inf_tipo]["diametro"]
 
 if num_varillas_capa_inf > 1:
@@ -237,13 +245,13 @@ else:
     espacio_libre_inf = espacio_disponible
 
 
-# --- UI PESTAÑAS ---
+# --- UI PESTAÑAS RENDERIZADAS ---
 t1, t2, t3 = st.tabs(["🚀 Control Sísmico y Criterio 1.33Mu", "📈 Análisis de Canales", "🧱 Detalle y Bastones Dobles"])
 
 with t1:
     st.subheader(f"Evaluación de Ductilidad para Sismo (Q = {Q_sismo})")
     
-    # Renderizado de Alerta de Constructibilidad/Vibrado en Pantalla Principal
+    # Alerta de Congestión en Obra
     if espacio_libre_inf < 2.5:
         st.error(f"⚠️ **Alerta de Congestión Constructiva:** El espacio libre entre varillas inferiores es de {espacio_libre_inf:.1f} cm (Menor a 2.5 cm). La grava de 3/4\" se va a atorar y provocará panales. Aumenta la base de la viga, disminuye el número de barras o colócalas en una segunda capa.")
     else:
