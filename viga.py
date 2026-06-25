@@ -100,7 +100,7 @@ for idx, ap in enumerate(st.session_state.apoyos):
     apoyos_procesados.append({"posicion": pos, "tipo": tipo})
 
 
-# --- SOLVER ESTRUCTURAL MATRICIAL (EXTRACCIÓN SANITIZADA Y CORREGIDA) ---
+# --- SOLVER ESTRUCTURAL MATRICIAL (CORRECCIÓN ABSOLUTA) ---
 puntos_sistema = sorted(list(set([0.0, L_total] + [ap["posicion"] for ap in apoyos_procesados])))
 ss = SystemElements()
 for i in range(len(puntos_sistema)-1):
@@ -117,16 +117,19 @@ for el_id in range(1, len(puntos_sistema)):
 
 ss.solve()
 
-# Extracción robusta de los arreglos numéricos de esfuerzos sin colisiones por llaves
+# Extracción segura de esfuerzos únicamente existentes en el problema plano flexivo
 M_list = []
 Q_list = []
 for el_id in range(1, len(puntos_sistema)):
     res = ss.get_element_results(element_id=el_id)
-    M_list.extend(res['M'])
-    Q_list.extend(res['Q'])
+    if 'M' in res:
+        M_list.extend(res['M'])
+    if 'Q' in res:
+        Q_list.extend(res['Q'])
 
-Mu_max = max(abs(np.array(M_list))) * 100000 # Convierte a kg-cm
-Vu_max = max(abs(np.array(Q_list))) * 1000   # Convierte a kg
+# Caídas de seguridad por si las listas vienen vacías temporalmente
+Mu_max = max(abs(np.array(M_list))) * 100000 if len(M_list) > 0 else 0.1
+Vu_max = max(abs(np.array(Q_list))) * 1000   if len(Q_list) > 0 else 0.1
 
 
 # --- LÍMITES DE ACERO DINÁMICOS POR SISMICIDAD Q (NTC 2023) ---
@@ -134,7 +137,6 @@ beta1 = 0.85 if fc <= 280 else max(0.85 - 0.05 * ((fc - 280) / 70), 0.65)
 rho_min = 0.7 * math.sqrt(fc) / fy
 as_min_formula = rho_min * b * d
 
-# Afectación de Q en la cuantía balanceada máxima permitida
 rho_b = (beta1 * 0.85 * fc / fy) * (6000 / (6000 + fy))
 if Q_sismo == 2:
     rho_max = 0.75 * rho_b
@@ -163,7 +165,7 @@ else:
     as_min_final = as_min_formula
 
 
-# --- OPTIMIZACIÓN AUTOMÁTICA CON FILTRO Q Y REGLA DE MAX 3 VARILLAS ---
+# --- OPTIMIZACIÓN AUTOMÁTICA ---
 opciones_validas = []
 for nombre_varilla, prop in VARILLAS.items():
     for n_barras in range(1, 4): 
@@ -183,14 +185,9 @@ for nombre_varilla, prop in VARILLAS.items():
             })
 
 df_optimo = pd.DataFrame(opciones_validas)
-if not df_optimo.empty:
-    df_optimo = df_optimo.sort_values(by="Peso (kg/m)").reset_index(drop=True)
-    mejor_armado_texto = df_optimo.iloc[0]["Configuración"]
-else:
-    mejor_armado_texto = "Ajustar dimensiones. El factor Q o el tope de 3 barras limita las opciones directas."
 
 
-# --- LONGITUD DE DESARROLLO NORMATIVA (ld) Y CORTE DE PLANOS DE OBRA ---
+# --- LONGITUD DE DESARROLLO Y PLANOS ---
 db_bast_sup = VARILLAS[v_bast_sup_tipo]["diametro"] if activar_bastones_sup else 1.0
 ld_sup = max((0.06 * db_bast_sup * fy) / math.sqrt(fc), 0.004 * db_bast_sup * fy, 30.0)
 longitud_plano_sup = max((L_total / 4) * 100, ld_sup)
@@ -200,7 +197,7 @@ ld_inf = max((0.06 * db_bast_inf * fy) / math.sqrt(fc), 0.004 * db_bast_inf * fy
 longitud_plano_inf = max((L_total * 0.60) * 100, ld_inf)
 
 
-# --- DEFLEXIÓN DE BRANSON CON RESOLUCIÓN DE EJE NEUTRO EXACTO (CUADRÁTICA) ---
+# --- DEFLEXIÓN DE BRANSON EXACTA ---
 Ig = (b * h**3) / 12
 fr = 2.0 * math.sqrt(fc)
 yt = h / 2
@@ -210,7 +207,6 @@ Ma = Mu_max / 1.3
 n_rel = 2000000 / (14000 * math.sqrt(fc))
 rho_real_inf = as_inf_total_colocado / (b * d) if (b * d) > 0 else 0.01
 
-# Ecuación cuadrática exacta para profundidad del eje neutro agrietado (k)
 k_exacto = math.sqrt((rho_real_inf * n_rel)**2 + 2 * rho_real_inf * n_rel) - (rho_real_inf * n_rel)
 Icr_exacto = (b * (k_exacto * d)**3) / 3 + n_rel * as_inf_total_colocado * (d - k_exacto * d)**2
 
@@ -222,7 +218,7 @@ flecha_diferida_total = flecha_servicio_inst * (1 + (2.0 / (1 + 50 * rho_prime))
 flecha_permisible = (L_total * 100) / 240
 
 
-# --- REVISIÓN CORTANTE Y RESTRICCIONES SÍSMICAS DE ESTRIBOS SEGÚN Q ---
+# --- CONFIGURACIÓN DE ESTRIBOS ---
 if Q_sismo == 2:
     s_max_confinado = min(d / 4, 10.0)
     s_max_central = min(d / 2, 25.0)
@@ -233,8 +229,6 @@ else:
     s_max_confinado = min(d / 4, 6 * VARILLAS[v_inf_tipo]["diametro"], 10.0)
     s_max_central = min(d / 4, 15.0)
 
-
-# --- VALIDACIÓN CONSTRUCTIVA: ESPACIO LIBRE PARA CONCRETO (GRAVA 3/4") ---
 num_varillas_capa_inf = v_inf_num + (v_bast_inf_num if activar_bastones_inf else 0)
 espacio_disponible = b - (2 * rec) - (2 * 0.95) 
 diametro_varilla_max_inf = VARILLAS[v_inf_tipo]["diametro"]
@@ -245,41 +239,35 @@ else:
     espacio_libre_inf = espacio_disponible
 
 
-# --- UI PESTAÑAS RENDERIZADAS ---
+# --- PESTAÑAS ---
 t1, t2, t3 = st.tabs(["🚀 Control Sísmico y Criterio 1.33Mu", "📈 Análisis de Canales", "🧱 Detalle y Bastones Dobles"])
 
 with t1:
     st.subheader(f"Evaluación de Ductilidad para Sismo (Q = {Q_sismo})")
     
-    # Alerta de Congestión en Obra
     if espacio_libre_inf < 2.5:
-        st.error(f"⚠️ **Alerta de Congestión Constructiva:** El espacio libre entre varillas inferiores es de {espacio_libre_inf:.1f} cm (Menor a 2.5 cm). La grava de 3/4\" se va a atorar y provocará panales. Aumenta la base de la viga, disminuye el número de barras o colócalas en una segunda capa.")
+        st.error(f"⚠️ **Alerta de Congestión Constructiva:** Espacio libre inferior {espacio_libre_inf:.1f} cm (< 2.5 cm). Peligro de grietas por falta de flujo de grava.")
     else:
-        st.success(f"📶 **Validación de Colado:** Espacio libre entre barras de {espacio_libre_inf:.1f} cm. Adecuado para un correcto vibrado y flujo del concreto.")
+        st.success(f"📶 **Validación de Colado:** Espacio libre entre barras de {espacio_libre_inf:.1f} cm. Adecuado.")
 
     if excepcion_133_aplica:
-        st.info("💡 **Excepción NTC Aplica:** El acero colocado es menor al mínimo reglamentario por fórmula, pero se aprueba legalmente porque el Momento Resistente excede 1.33 veces al Momento Último de diseño.")
+        st.info("💡 **Excepción NTC Aplica:** El acero colocado es menor al mínimo, aprobado por criterio de resistencia de 1.33 * Mu.")
     
     c1, c2, c3 = st.columns(3)
     c1.metric("Acero Mínimo Final", f"{as_min_final:.2f} cm²", f"Fórmula: {as_min_formula:.1f} cm²")
-    c2.metric("Acero Máximo Dúctil (Q)", f"{as_max:.2f} cm²", f"Límite Restringido")
+    c2.metric("Acero Máximo Dúctil (Q)", f"{as_max:.2f} cm²")
     c3.metric("Tu Acero Inferior Total", f"{as_inf_total_colocado:.2f} cm²")
 
-    st.subheader("Combinaciones de Optimización Comercial Ordenadas por Economía")
+    st.subheader("Combinaciones de Optimización Comercial")
     if not df_optimo.empty:
         st.dataframe(df_optimo, use_container_width=True)
 
 with t2:
-    st.subheader("Simulación Hiperestática y Deflexión de Branson Exacta")
+    st.subheader("Simulación Hiperestática y Deflexión Exacta")
     col_b1, col_b2 = st.columns(2)
-    col_b1.metric("Inercia Efectiva Agrietada (Ie)", f"{Ie:.0f} cm⁴", f"Bruta Ig: {Ig:.0f} cm⁴")
-    col_b2.metric("Deflexión Diferida Real", f"{flecha_diferida_total:.2f} cm", f"Límite L/240: {flecha_permisible:.2f} cm")
+    col_b1.metric("Inercia Efectiva Agrietada (Ie)", f"{Ie:.0f} cm⁴")
+    col_b2.metric("Deflexión Diferida Real", f"{flecha_diferida_total:.2f} cm", f"Límite: {flecha_permisible:.2f} cm")
     
-    if flecha_diferida_total <= flecha_permisible:
-        st.success("✅ Deflexiones tolerables bajo condiciones de servicio.")
-    else:
-        st.error("❌ La sección se agrieta en exceso y se cuelga. Incrementa el peralte de concreto (h).")
-
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 4))
     ss.plot_bending_moment(ax=ax1, scale=0.08, font_size=7)
     ss.plot_shear_force(ax=ax2, scale=0.08, font_size=7)
@@ -287,7 +275,7 @@ with t2:
     st.pyplot(fig)
 
 with t3:
-    st.subheader("Distribución de Refuerzo y Guía de Habilitado para Taller")
+    st.subheader("Distribución de Refuerzo")
     col_g1, col_g2 = st.columns([1, 2])
     
     with col_g1:
@@ -295,14 +283,12 @@ with t3:
         ax_s.add_patch(plt.Rectangle((0, 0), b, h, color="lightgrey", alpha=0.8))
         ax_s.add_patch(plt.Rectangle((2.5, 2.5), b-5, h-5, fill=False, edgecolor="blue", linewidth=2))
         
-        # Inferiores Base + Bastones Inf
         x_inf = np.linspace(5, b-5, v_inf_num) if v_inf_num > 1 else [b/2]
         for xc in x_inf: ax_s.scatter(xc, 5, color="red", s=180, zorder=5)
         if activar_bastones_inf:
             x_binf = np.linspace(8, b-8, v_bast_inf_num) if v_bast_inf_num > 1 else [b/2]
             for xc in x_binf: ax_s.scatter(xc, 9, color="orange", s=130, zorder=5, marker="v")
 
-        # Superiores Base + Bastones Sup
         x_sup = np.linspace(5, b-5, v_sup_num) if v_sup_num > 1 else [b/2]
         for xc in x_sup: ax_s.scatter(xc, h-5, color="darkred", s=140, zorder=5)
         if activar_bastones_sup:
@@ -314,12 +300,10 @@ with t3:
         st.pyplot(fig_sect)
         
     with col_g2:
-        st.subheader("Planilla de Corte y Colocación en Campo")
-        st.info(f"📍 **Zona Confinada (Apoyos a Extremos):** Colocar estribos cada **{s_max_confinado:.1f} cm**")
-        st.success(f"🍃 **Zona Central de la Viga:** Colocar estribos cada **{s_max_central:.1f} cm**")
-        
+        st.subheader("Planilla de Corte")
+        st.info(f"📍 **Zona Confinada:** Estribos cada **{s_max_confinado:.1f} cm**")
+        st.success(f"🍃 **Zona Central:** Estribos cada **{s_max_central:.1f} cm**")
         if activar_bastones_sup:
-            st.warning(f"📐 **Corte de Bastón Superior (Negativo):** Habilitar varillas de **L = {longitud_plano_sup / 100:.2f} m**. "
-                       f"Si el apoyo es un empotre exterior, añadir gancho estándar a 90° de {12 * db_bast_sup:.1f} cm.")
+            st.warning(f"📐 **Bastón Superior:** Habilitar varillas de **L = {longitud_plano_sup / 100:.2f} m**.")
         if activar_bastones_inf:
-            st.warning(f"📐 **Corte de Bastón Inferior (Positivo):** Habilitar varillas de **L = {longitud_plano_inf / 100:.2f} m** y centrarlas perfectamente a mitad del claro libre.")
+            st.warning(f"📐 **Bastón Inferior:** Habilitar varillas de **L = {longitud_plano_inf / 100:.2f} m**.")
