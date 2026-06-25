@@ -100,7 +100,7 @@ for idx, ap in enumerate(st.session_state.apoyos):
     apoyos_procesados.append({"posicion": pos, "tipo": tipo})
 
 
-# --- SOLVER ESTRUCTURAL MATRICIAL (CORRECCIÓN ABSOLUTA) ---
+# --- SOLVER ESTRUCTURAL MATRICIAL (CORREGIDO TOTALMENTE) ---
 puntos_sistema = sorted(list(set([0.0, L_total] + [ap["posicion"] for ap in apoyos_procesados])))
 ss = SystemElements()
 for i in range(len(puntos_sistema)-1):
@@ -117,7 +117,6 @@ for el_id in range(1, len(puntos_sistema)):
 
 ss.solve()
 
-# Extracción segura de esfuerzos únicamente existentes en el problema plano flexivo
 M_list = []
 Q_list = []
 for el_id in range(1, len(puntos_sistema)):
@@ -127,7 +126,6 @@ for el_id in range(1, len(puntos_sistema)):
     if 'Q' in res:
         Q_list.extend(res['Q'])
 
-# Caídas de seguridad por si las listas vienen vacías temporalmente
 Mu_max = max(abs(np.array(M_list))) * 100000 if len(M_list) > 0 else 0.1
 Vu_max = max(abs(np.array(Q_list))) * 1000   if len(Q_list) > 0 else 0.1
 
