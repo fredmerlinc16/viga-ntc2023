@@ -152,7 +152,7 @@ for i in range(len(puntos_sistema)-1):
 
 def obtener_nodo_exacto(sistema, target_x):
     for nid, n in sistema.node_map.items():
-        if abs(n.vertex[0] - target_x) < 1e-4: return nid
+        if abs(n.x - target_x) < 1e-4: return nid  # <-- CORREGIDO: vertex por .x
     return None
 
 for ap in apoyos_procesados:
@@ -176,20 +176,20 @@ for px, pu_tot in cargas_nodo.items():
 
 ss.solve()
 
-# --- EXTRACCIÓN GLOBAL DE VECTORES PARA PLOTLY ---
+# --- EXTRACCIÓN GLOBAL DE VECTORES PARA PLOTLY (BLINDADA) ---
 x_plot, m_plot, v_plot, u_plot = [], [], [], []
 for el_id in sorted(ss.element_map.keys()):
     el = ss.element_map[el_id]
     n_sub = len(el.bending_moment)
-    x_sub = np.linspace(el.node_1.vertex[0], el.node_2.vertex[0], n_sub)
+    x_sub = np.linspace(el.node_1.x, el.node_2.x, n_sub)
     
     x_plot.extend(x_sub)
-    m_plot.extend(el.bending_moment)
-    v_plot.extend(el.shear_force)
+    m_plot.extend([float(val) for val in el.bending_moment])
+    v_plot.extend([float(val) for val in el.shear_force])
     u_plot.extend(np.array(el.deflection) * 1000.0) # Convertir m a mm
 
-Mu_max = max(abs(np.array(m_plot))) * 100000 if m_plot else 10000
-Vu_max = max(abs(np.array(v_plot))) * 1000 if v_plot else 1000
+Mu_max = max(abs(np.array(m_plot))) if m_plot else 0.1
+Vu_max = max(abs(np.array(v_plot))) if v_plot else 0.1
 
 
 # --- CÁLCULOS NORMATIVOS DE ESTRIBOS ---
@@ -202,7 +202,7 @@ pzas_ext = math.ceil(L_conf_un_lado / s_conf)
 L_centro_total = max(0.0, L_cm - (2.0 * L_conf_un_lado))
 pzas_cent = math.ceil(L_centro_total / s_cent) if L_centro_total > 0 else 0
 
-# --- CÁLCULOS A FLEXIÓN Y BRANSON ---
+# --- CÁLCULOS A FLEXIÓN Y BRANSON (CALIBRADO MKS) ---
 beta1 = 0.85 if fc <= 280 else max(0.85 - 0.05 * ((fc - 280) / 70), 0.65)
 as_min_form = (0.7 * math.sqrt(fc) / fy) * b * d
 rho_b = (beta1 * 0.85 * fc / fy) * (6000 / (6000 + fy))
@@ -210,8 +210,10 @@ rho_max = rho_b * (0.75 if Q_sismo == 2 else (0.50 if Q_sismo == 3 else 0.35))
 as_max = rho_max * b * d
 
 a_real = ((as_inf_colocado - as_sup_colocado) * fy) / (0.85 * fc * b) if (as_inf_colocado - as_sup_colocado) > 0 else 0.1
-MR = 0.90 * ((as_inf_colocado - as_sup_colocado) * fy * (d - a_real / 2) + as_sup_colocado * fy * (d - rec))
-excepcion_133 = True if (as_inf_colocado < as_min_form and MR >= 1.33 * Mu_max) else False
+MR_kg_cm = 0.90 * ((as_inf_colocado - as_sup_colocado) * fy * (d - a_real / 2) + as_sup_colocado * fy * (d - rec))
+MR_ton_m = MR_kg_cm / 100000.0
+
+excepcion_133 = True if (as_inf_colocado < as_min_form and MR_ton_m >= 1.33 * Mu_max) else False
 as_min_final = as_inf_colocado if excepcion_133 else as_min_form
 
 opciones_validas = []
@@ -219,13 +221,14 @@ for nombre_var, prop in VARILLAS.items():
     for n_barras in range(1, 5): 
         as_prueba = prop["area"] * n_barras
         a_p = (as_prueba * fy) / (0.85 * fc * b)
-        MR_p = 0.90 * as_prueba * fy * (d - a_p / 2)
-        if ((as_prueba >= as_min_form) or (MR_p >= 1.33 * Mu_max)) and (as_prueba <= as_max) and (MR_p >= Mu_max):
+        MR_p_ton_m = (0.90 * as_prueba * fy * (d - a_p / 2)) / 100000.0
+        
+        if ((as_prueba >= as_min_form) or (MR_p_ton_m >= 1.33 * Mu_max)) and (as_prueba <= as_max) and (MR_p_ton_m >= Mu_max):
             opciones_validas.append({
                 "Armado Propuesto": f"{n_barras} var. {nombre_var}",
                 "Área (cm²)": round(as_prueba, 2),
-                "MR (ton·m)": round(MR_p / 100000, 2),
-                "Eficiencia (%)": round((Mu_max / MR_p) * 100, 1) if MR_p > 0 else 0,
+                "MR (ton·m)": round(MR_p_ton_m, 2),
+                "Eficiencia (%)": round((Mu_max / MR_p_ton_m) * 100, 1) if MR_p_ton_m > 0 else 0,
                 "Peso (kg/m)": round(prop["peso"] * n_barras, 2)
             })
 
@@ -233,14 +236,18 @@ df_optimo = pd.DataFrame(opciones_validas)
 if not df_optimo.empty: df_optimo = df_optimo.sort_values(by="Peso (kg/m)", ascending=True)
 
 Ig = (b * h**3) / 12
-Mcr = ((2.0 * math.sqrt(fc)) * Ig) / (h / 2)
+Mcr_kg_cm = ((2.0 * math.sqrt(fc)) * Ig) / (h / 2)
+Mcr_ton_m = Mcr_kg_cm / 100000.0
+
 Ma = Mu_max / 1.3 if Mu_max > 0 else 0.1
 n_rel = 2000000 / (14000 * math.sqrt(fc))
 rho_inf = as_inf_colocado / (b * d) if (b * d) > 0 else 0.01
 k_br = math.sqrt((rho_inf * n_rel)**2 + 2 * rho_inf * n_rel) - (rho_inf * n_rel)
 Icr = (b * (k_br * d)**3) / 3 + n_rel * as_inf_colocado * (d - k_br * d)**2
-Ie = min(((Mcr / Ma)**3) * Ig + (1 - (Mcr / Ma)**3) * Icr, Ig) if Ma > Mcr else Ig
-flecha_inst = (5 * ((w_cm + w_cv)*10) * (L_total*100)**4) / (384 * (14000 * math.sqrt(fc)) * Ie)
+
+Ie = min(((Mcr_ton_m / Ma)**3) * Ig + (1 - (Mcr_ton_m / Ma)**3) * Icr, Ig) if Ma > Mcr_ton_m else Ig
+flecha_inst = (5 * ((w_cm + w_cv)/100.0) * (L_total*100)**4) / (384 * (14000 * math.sqrt(fc)) * Ie)
+
 rho_p = as_sup_colocado / (b * d) if (b * d) > 0 else 0.01
 flecha_diferida = flecha_inst * (1 + (2.0 / (1 + 50 * rho_p)))
 flecha_perm = (L_total * 100) / 240
@@ -250,8 +257,8 @@ flecha_perm = (L_total * 100) / 240
 # --- INTERFAZ GRÁFICA ---
 # =====================================================================
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Momento Máximo (Mu)", f"{Mu_max/100000:.2f} t·m")
-k2.metric("Cortante Máximo (Vu)", f"{Vu_max/1000:.2f} t")
+k1.metric("Momento Máximo (Mu)", f"{Mu_max:.2f} t·m")
+k2.metric("Cortante Máximo (Vu)", f"{Vu_max:.2f} t")
 k3.metric("Estribos Extremos (2h)", f"{pzas_ext} pzas @ {s_conf:.1f} cm", f"En primeros {L_conf_un_lado:.0f} cm c/apoyo")
 k4.metric("Estribos Centro", f"{pzas_cent} pzas @ {s_cent:.1f} cm", f"En los {L_centro_total:.0f} cm centrales")
 
@@ -358,7 +365,7 @@ with t3:
     m1, m2, m3 = st.columns(3)
     m1.metric("Acero Mínimo NTC", f"{as_min_final:.2f} cm²")
     m2.metric(f"Acero Máximo (Q={Q_sismo})", f"{as_max:.2f} cm²")
-    m3.metric("Estatus Resistencia", "CUMPLE" if MR >= Mu_max else "NO CUMPLE", f"MR: {MR/100000:.2f} t·m")
+    m3.metric("Estatus Resistencia", "CUMPLE" if MR_ton_m >= Mu_max else "NO CUMPLE", f"MR: {MR_ton_m:.2f} t·m")
 
 with t4:
     c_f1, c_f2 = st.columns(2)
