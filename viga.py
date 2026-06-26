@@ -38,7 +38,6 @@ w_cm = st.sidebar.number_input("w Muerta (ton/m)", value=1.5, step=0.5)
 w_cv = st.sidebar.number_input("w Viva (ton/m)", value=0.8, step=0.2)
 w_facturada = (1.3 * w_cm) + (1.5 * w_cv)
 
-# --- NUEVO: CARGAS PUNTUALES ---
 st.sidebar.header("4. Cargas Puntuales (Servicio)")
 if 'cargas_p' not in st.session_state:
     st.session_state.cargas_p = []
@@ -128,7 +127,6 @@ for ap in apoyos_procesados:
 for el_id in range(1, len(puntos_sistema)):
     ss.q_load(q=-w_facturada, element_id=el_id)
 
-# Acumular cargas puntuales por si caen en la misma coordenada exacta
 cargas_nodo = {}
 for cp in cargas_p_procesadas:
     px = round(float(cp["posicion"]), 4)
@@ -154,7 +152,7 @@ Mu_max = max(abs(np.array(f_momento))) * 100000
 Vu_max = max(abs(np.array(f_cortante))) * 1000
 
 
-# --- MOTOR GRÁFICO DEL ESQUEMA FÍSICO DE LA VIGA ---
+# --- ESQUEMA FÍSICO DE LA VIGA ---
 def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
     fig, ax = plt.subplots(figsize=(10, 2.2))
     ax.plot([0, L], [0, 0], color='#1E293B', linewidth=9, zorder=3)
@@ -195,7 +193,7 @@ def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
     return fig
 
 
-# --- DASHBOARD PRINCIPAL (VISTA INMEDIATA) ---
+# --- DASHBOARD PRINCIPAL ---
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Momento Máximo de Diseño", f"{Mu_max/100000:.2f} ton·m")
 k2.metric("Cortante Máximo de Diseño", f"{Vu_max/1000:.2f} ton")
@@ -205,22 +203,29 @@ k4.metric("Cargas Puntuales Activas", f"{len(cargas_p_procesadas)}")
 st.subheader("📍 Esquema del Sistema Estructural")
 st.pyplot(generar_esquema_visual(L_total, apoyos_procesados, w_facturada, cargas_p_procesadas))
 
+# --- MOTOR GRÁFICO DE DIAGRAMAS A PRUEBA DE FALLOS ---
 st.subheader("📊 Diagramas de Esfuerzos Internos")
+
 try:
-    fig_diag, (ax_m, ax_v) = plt.subplots(2, 1, figsize=(11, 6.5))
-    ss.plot_bending_moment(ax=ax_m, scale=0.07, font_size=8.5)
-    ax_m.set_title("Diagrama de Momentos Flectores (ton·m)", fontsize=10, fontweight='bold', pad=12)
-    
-    ss.plot_shear_force(ax=ax_v, scale=0.07, font_size=8.5)
-    ax_v.set_title("Diagrama de Fuerzas Cortantes (ton)", fontsize=10, fontweight='bold', pad=12)
-    
-    plt.tight_layout(pad=2.5)
-    st.pyplot(fig_diag)
-except Exception:
-    st.error("Error al renderizar diagramas. Verifica que la distancia de los apoyos no genere inestabilidad.")
+    st.markdown("**1. Diagrama de Momentos Flectores (ton·m)**")
+    fig_m = ss.plot_bending_moment(show=False)
+    if fig_m is None: fig_m = plt.gcf()
+    fig_m.set_size_inches(10.5, 3.2)
+    st.pyplot(fig_m)
+    plt.close(fig_m)
+
+    st.markdown("**2. Diagrama de Fuerzas Cortantes (ton)**")
+    fig_v = ss.plot_shear_force(show=False)
+    if fig_v is None: fig_v = plt.gcf()
+    fig_v.set_size_inches(10.5, 3.2)
+    st.pyplot(fig_v)
+    plt.close(fig_v)
+
+except Exception as e:
+    st.error(f"Error estructural: No se pudieron trazar los esfuerzos. Verifica distancias lógicas entre apoyos.")
 
 
-# --- CÁLCULOS NORMATIVOS COMPLEMENTARIOS ---
+# --- CÁLCULOS NORMATIVOS Y DE OPTIMIZACIÓN ---
 beta1 = 0.85 if fc <= 280 else max(0.85 - 0.05 * ((fc - 280) / 70), 0.65)
 as_min_form = (0.7 * math.sqrt(fc) / fy) * b * d
 
@@ -237,6 +242,31 @@ if as_inf_colocado < as_min_form and MR >= 1.33 * Mu_max:
     as_min_final = as_inf_colocado 
 else:
     as_min_final = as_min_form
+
+# Algoritmo de alternativas de acero
+opciones_validas = []
+for nombre_var, prop in VARILLAS.items():
+    for n_barras in range(1, 5): 
+        as_prueba = prop["area"] * n_barras
+        a_p = (as_prueba * fy) / (0.85 * fc * b)
+        MR_p = 0.90 * as_prueba * fy * (d - a_p / 2)
+        
+        c_min = (as_prueba >= as_min_form) or (MR_p >= 1.33 * Mu_max)
+        c_max = as_prueba <= as_max
+        c_res = MR_p >= Mu_max
+        
+        if c_min and c_max and c_res:
+            opciones_validas.append({
+                "Armado Propuesto": f"{n_barras} var. {nombre_var}",
+                "Área (cm²)": round(as_prueba, 2),
+                "MR (ton·m)": round(MR_p / 100000, 2),
+                "Eficiencia (%)": round((Mu_max / MR_p) * 100, 1) if MR_p > 0 else 0,
+                "Peso (kg/m)": round(prop["peso"] * n_barras, 2)
+            })
+
+df_optimo = pd.DataFrame(opciones_validas)
+if not df_optimo.empty:
+    df_optimo = df_optimo.sort_values(by="Peso (kg/m)", ascending=True)
 
 # Branson
 Ig = (b * h**3) / 12
@@ -256,7 +286,12 @@ flecha_perm = (L_total * 100) / 240
 
 # --- PESTAÑAS DE REVISIÓN Y DESPIECE ---
 st.markdown("---")
-t1, t2, t3 = st.tabs(["📋 Despiece de Armado", "⚖️ Revisión Normativa NTC", "📐 Deflexiones e Inercias"])
+t1, t2, t3, t4 = st.tabs([
+    "📋 Despiece de Armado", 
+    "💡 Alternativas de Acero", 
+    "⚖️ Revisión Normativa NTC", 
+    "📐 Deflexiones e Inercias"
+])
 
 with t1:
     col_sect, col_det = st.columns([1, 2])
@@ -282,13 +317,23 @@ with t1:
         st.write(f"**Acero Colocado:** Inferior = `{as_inf_colocado:.2f} cm²` | Superior = `{as_sup_colocado:.2f} cm²`")
 
 with t2:
+    st.subheader("Armados Comerciales Factibles")
+    st.caption("Filtra automáticamente combinaciones que cumplen simultáneamente: As_min normativo, As_max sísmico y MR ≥ Mu")
+    if not df_optimo.empty:
+        st.dataframe(df_optimo, use_container_width=True, hide_index=True)
+        mejor = df_optimo.iloc[0]
+        st.success(f"🏆 **Opción Óptima (Más Ligera):** `{mejor['Armado Propuesto']}` con un peso de **{mejor['Peso (kg/m)']} kg/m**")
+    else:
+        st.warning("⚠️ Ningún armado simple (de 1 a 4 varillas idénticas) logra cubrir la demanda sísmica y mecánica. Aumenta la sección (b x h) o el f'c.")
+
+with t3:
     if excepcion_133: st.info("💡 **Excepción 1.33Mu Activa:** Cuantía menor al mínimo permitida por sobreresistencia.")
     m1, m2, m3 = st.columns(3)
     m1.metric("Acero Mínimo NTC", f"{as_min_final:.2f} cm²")
-    m2.metric("Acero Máximo (Q={Q_sismo})", f"{as_max:.2f} cm²")
+    m2.metric(f"Acero Máximo (Q={Q_sismo})", f"{as_max:.2f} cm²")
     m3.metric("Estatus Resistencia", "CUMPLE" if MR >= Mu_max else "NO CUMPLE", f"MR: {MR/100000:.2f} t·m")
 
-with t3:
+with t4:
     c_f1, c_f2 = st.columns(2)
     c_f1.metric("Inercia Efectiva Agrietada (Ie)", f"{Ie:.0f} cm⁴", f"Bruta: {Ig:.0f} cm⁴")
     c_f2.metric("Flecha Diferida a Largo Plazo", f"{flecha_diferida:.2f} cm", f"Límite: {flecha_perm:.2f} cm")
