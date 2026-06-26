@@ -3,10 +3,13 @@ import numpy as np
 import pandas as pd
 import math
 
-# FORZAR MODO HEADLESS PARA SERVIDORES WEB
+# Motor estático para esquemas rápidos
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+# Motor Interactivo de Alta Gama
+import plotly.graph_objects as go
 
 from anastruct import SystemElements
 
@@ -14,7 +17,7 @@ from anastruct import SystemElements
 st.set_page_config(page_title="Software de Vigas Profesional NTC 2023", layout="wide")
 
 st.title("🏗️ Suite de Ingeniería de Vigas Continuas - NTC 2023")
-st.caption("Motor hiperestático matricial con rigidez real (EI), Branson exacto y renderizado nativo")
+st.caption("Motor hiperestático matricial con rigidez real (EI), Branson exacto y renderizado interactivo Plotly")
 
 VARILLAS = {
     "#3 (3/8\")": {"diametro": 0.95, "area": 0.71, "peso": 0.56},
@@ -50,10 +53,10 @@ if metodo_carga == "Área Tributaria Manual (m²)":
     q_cm = col_tr2.number_input("CM (ton/m²)", value=0.50, step=0.05)
     q_cv = st.sidebar.number_input("CV máxima (ton/m²)", value=0.20, step=0.05)
     
-    # Deducción de carga lineal en la viga: (Área * Presión) / Longitud
+    # Deducción de carga lineal: (Área * Presión) / Longitud
     ancho_equivalente = area_trib / L_total if L_total > 0 else 0
     w_cm = q_cm * ancho_equivalente
-    w_cv = q_cv * ancho_equivalent
+    w_cv = q_cv * ancho_equivalente  # <-- CORREGIDO EL TYPO AQUÍ
     st.sidebar.caption(f"↳ Ancho trib. deducido: **{ancho_equivalente:.2f} m** | **wCM = {w_cm:.2f} t/m** | **wCV = {w_cv:.2f} t/m**")
 else:
     col_d1, col_d2 = st.sidebar.columns(2)
@@ -136,7 +139,7 @@ I_m4 = (b_m * h_m**3) / 12.0
 EA_real = Ec_ton_m2 * A_m2
 EI_real = Ec_ton_m2 * I_m4
 
-# Mapeo de discretización fina para diagramas perfectos
+# Discretización perfecta blindada contra errores de redondeo de Python
 puntos_criticos = [0.0, float(L_total)]
 for ap in apoyos_procesados: puntos_criticos.append(round(float(ap["posicion"]), 4))
 for cp in cargas_p_procesadas: puntos_criticos.append(round(float(cp["posicion"]), 4))
@@ -147,13 +150,18 @@ ss = SystemElements(EA=EA_real, EI=EI_real)
 for i in range(len(puntos_sistema)-1):
     ss.add_element(location=[[puntos_sistema[i], 0], [puntos_sistema[i+1], 0]])
 
+def obtener_nodo_exacto(sistema, target_x):
+    for nid, n in sistema.node_map.items():
+        if abs(n.vertex[0] - target_x) < 1e-4: return nid
+    return None
+
 for ap in apoyos_procesados:
-    n_id = ss.find_node_id([round(float(ap["posicion"]), 4), 0])
+    n_id = obtener_nodo_exacto(ss, float(ap["posicion"]))
     if n_id:
         if ap["tipo"] == "Empotrado": ss.add_support_fixed(node_id=n_id)
         else: ss.add_support_hinged(node_id=n_id)
 
-for el_id in range(1, len(puntos_sistema)):
+for el_id in ss.element_map.keys():
     ss.q_load(q=-w_facturada, element_id=el_id)
 
 cargas_nodo = {}
@@ -163,21 +171,22 @@ for cp in cargas_p_procesadas:
     cargas_nodo[px] = cargas_nodo.get(px, 0.0) + pu
 
 for px, pu_tot in cargas_nodo.items():
-    n_id = ss.find_node_id([px, 0])
+    n_id = obtener_nodo_exacto(ss, px)
     if n_id and pu_tot > 0: ss.point_load(node_id=n_id, Fx=0, Fy=-pu_tot)
 
 ss.solve()
 
-# --- EXTRACCIÓN DE VECTORES DE ESFUERZO PARA RENDER PROPIO ---
+# --- EXTRACCIÓN GLOBAL DE VECTORES PARA PLOTLY ---
 x_plot, m_plot, v_plot, u_plot = [], [], [], []
-for el_id in range(1, len(puntos_sistema)):
-    res = ss.get_element_results(element_id=el_id)
-    if res:
-        # Anastruct entrega los vectores fragmentados por elemento
-        x_plot.extend(res['length'])
-        m_plot.extend(res['M'])
-        v_plot.extend(res['Q'])
-        u_plot.extend(res['w'])
+for el_id in sorted(ss.element_map.keys()):
+    el = ss.element_map[el_id]
+    n_sub = len(el.bending_moment)
+    x_sub = np.linspace(el.node_1.vertex[0], el.node_2.vertex[0], n_sub)
+    
+    x_plot.extend(x_sub)
+    m_plot.extend(el.bending_moment)
+    v_plot.extend(el.shear_force)
+    u_plot.extend(np.array(el.deflection) * 1000.0) # Convertir m a mm
 
 Mu_max = max(abs(np.array(m_plot))) * 100000 if m_plot else 10000
 Vu_max = max(abs(np.array(v_plot))) * 1000 if v_plot else 1000
@@ -247,7 +256,7 @@ k3.metric("Estribos Extremos (2h)", f"{pzas_ext} pzas @ {s_conf:.1f} cm", f"En p
 k4.metric("Estribos Centro", f"{pzas_cent} pzas @ {s_cent:.1f} cm", f"En los {L_centro_total:.0f} cm centrales")
 
 def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
-    fig, ax = plt.subplots(figsize=(10, 2.0))
+    fig, ax = plt.subplots(figsize=(10, 1.8))
     ax.plot([0, L], [0, 0], color='#1E293B', linewidth=8, zorder=3)
     for ap in apoyos:
         x = ap['posicion']
@@ -275,58 +284,45 @@ def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
 st.subheader("📍 Esquema del Sistema Estructural")
 st.pyplot(generar_esquema_visual(L_total, apoyos_procesados, w_facturada, cargas_p_procesadas))
 
-st.subheader("📊 Esfuerzos Internos y Deformación (Motor Gráfico NTC)")
+st.subheader("📊 Esfuerzos Internos y Deformación (Motor Interactivo Plotly)")
 
-# --- DIBUJADO NATIVO MATPLOTLIB (INMUNE A ANASTRUCT) ---
+# --- FUNCIÓN GENERADORA PLOTLY ---
+def crear_grafico_interactivo(x_vals, y_vals, titulo, color_linea, color_area, ejey_text, unidad, invertir=False):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x_vals, y=y_vals,
+        mode='lines', name=titulo,
+        line=dict(color=color_linea, width=2.5),
+        fill='tozeroy', fillcolor=color_area,
+        hovertemplate=f"<b>Posición:</b> %{{x:.2f}} m<br><b>{ejey_text}:</b> %{{y:.2f}} {unidad}<extra></extra>"
+    ))
+    fig.add_hline(y=0, line_color="#94A3B8", line_width=1, line_dash="dash")
+    fig.update_layout(
+        title=dict(text=f"<b>{titulo}</b>", font=dict(size=14, color="#1E293B")),
+        height=270, margin=dict(l=10, r=10, t=35, b=10),
+        hovermode="x unified",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(title="Longitud (m)", showgrid=True, gridcolor="#F1F5F9", zeroline=False),
+        yaxis=dict(title=f"{ejey_text} ({unidad})", showgrid=True, gridcolor="#F1F5F9", zeroline=False,
+                   autorange="reversed" if invertir else True)
+    )
+    return fig
+
 if x_plot:
-    col_d_left, col_d_right = st.columns(2)
-    
-    with col_d_left:
-        # DIAGRAMA DE MOMENTOS (Convención Mexicana: Negativos arriba)
-        fig_m, ax_m = plt.subplots(figsize=(6, 2.5))
-        m_arr = np.array(m_plot)
-        ax_m.plot(x_plot, -m_arr, color="#DC2626", lw=2)
-        ax_m.fill_between(x_plot, 0, -m_arr, color="#FEE2E2", alpha=0.6)
-        ax_m.axhline(0, color="black", lw=0.8, ls="--")
-        ax_m.set_title("Momentos Flectores (ton·m) [- Arriba / + Abajo]", fontsize=9, fontweight="bold")
-        ax_m.set_ylabel("M (t·m)", fontsize=8)
-        ax_m.grid(True, ls=":", alpha=0.6)
+    col_pl1, col_pl2 = st.columns(2)
+    with col_pl1:
+        # MOMENTO: Invertido (Convención estructural mexicana)
+        fig_m = crear_grafico_interactivo(x_plot, m_plot, "Momentos Flectores [- Arriba / + Abajo]", "#DC2626", "rgba(220,38,38,0.15)", "Momento", "t·m", invertir=True)
+        st.plotly_chart(fig_m, use_container_width=True)
         
-        # Etiquetar picos
-        idx_max = np.argmax(abs(m_arr))
-        ax_m.annotate(f"{m_arr[idx_max]:.2f}", xy=(x_plot[idx_max], -m_arr[idx_max]), 
-                      xytext=(x_plot[idx_max], -m_arr[idx_max]*1.15),
-                      arrowprops=dict(arrowstyle="->", lw=0.8), ha="center", fontsize=8, fontweight="bold")
-        plt.tight_layout(); st.pyplot(fig_m)
+    with col_pl2:
+        # CORTANTE
+        fig_v = crear_grafico_interactivo(x_plot, v_plot, "Fuerzas Cortantes", "#2563EB", "rgba(37,99,235,0.15)", "Cortante", "t", invertir=False)
+        st.plotly_chart(fig_v, use_container_width=True)
 
-    with col_d_right:
-        # DIAGRAMA DE CORTANTES
-        fig_v, ax_v = plt.subplots(figsize=(6, 2.5))
-        v_arr = np.array(v_plot)
-        ax_v.plot(x_plot, v_arr, color="#2563EB", lw=2)
-        ax_v.fill_between(x_plot, 0, v_arr, color="#DBEAFE", alpha=0.6)
-        ax_v.axhline(0, color="black", lw=0.8, ls="--")
-        ax_v.set_title("Fuerzas Cortantes (ton)", fontsize=9, fontweight="bold")
-        ax_v.set_ylabel("V (t)", fontsize=8)
-        ax_v.grid(True, ls=":", alpha=0.6)
-        
-        idx_v = np.argmax(abs(v_arr))
-        ax_v.annotate(f"{v_arr[idx_v]:.2f} t", xy=(x_plot[idx_v], v_arr[idx_v]), 
-                      xytext=(x_plot[idx_v], v_arr[idx_v]*1.15),
-                      arrowprops=dict(arrowstyle="->", lw=0.8), ha="center", fontsize=8, fontweight="bold")
-        plt.tight_layout(); st.pyplot(fig_v)
-
-    # DIAGRAMA DE DEFLEXIÓN ELÁSTICA
-    fig_u, ax_u = plt.subplots(figsize=(12, 1.8))
-    u_arr_mm = np.array(u_plot) * 1000.0 # Convertir m a milímetros
-    ax_u.plot(x_plot, u_arr_mm, color="#059669", lw=1.8)
-    ax_u.fill_between(x_plot, 0, u_arr_mm, color="#D1FAE5", alpha=0.5)
-    ax_u.axhline(0, color="black", lw=0.8)
-    ax_u.invert_yaxis() # Flechas van hacia abajo en la realidad física
-    ax_u.set_title("Deformación Elástica Instantánea (mm) [Eje invertido hacia la gravedad]", fontsize=9, fontweight="bold")
-    ax_u.set_ylabel("Flecha (mm)", fontsize=8); ax_u.set_xlabel("Longitud de viga (m)", fontsize=8)
-    ax_u.grid(True, ls=":", alpha=0.6)
-    plt.tight_layout(); st.pyplot(fig_u)
+    # DEFLEXIÓN
+    fig_u = crear_grafico_interactivo(x_plot, u_plot, "Deformación Elástica Instantánea (Gravedad hacia abajo)", "#059669", "rgba(5,150,105,0.15)", "Flecha", "mm", invertir=False)
+    st.plotly_chart(fig_u, use_container_width=True)
 
 
 # --- PESTAÑAS INFERIORES ---
