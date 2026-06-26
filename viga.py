@@ -2,7 +2,12 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import math
+
+# FORZAR MODO HEADLESS (Vital para servidores web sin monitor)
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
 from anastruct import SystemElements
 
 # 1. Configuración de Página
@@ -24,6 +29,11 @@ st.sidebar.header("1. Materiales y Sismo")
 fc = st.sidebar.number_input("f'c - Concreto (kg/cm²)", value=250, step=50)
 fy = st.sidebar.number_input("fy - Acero Long. (kg/cm²)", value=4200, step=100)
 fyv = st.sidebar.number_input("fyv - Estribos (kg/cm²)", value=4200, step=100)
+
+# Módulo E sugerido por NTC (14000 * sqrt(fc) convertido de kg/cm2 a ton/m2)
+E_ntc_sugerido = float(round(14000 * math.sqrt(fc) * 10))
+Ec_ton_m2 = st.sidebar.number_input("Módulo de Elasticidad E (ton/m²)", value=E_ntc_sugerido, step=50000.0, format="%.0f")
+
 Q_sismo = st.sidebar.selectbox("Factor de Comportamiento Sísmico (Q)", [2, 3, 4], index=0)
 
 st.sidebar.header("2. Geometría")
@@ -34,8 +44,22 @@ L_total = st.sidebar.number_input("Longitud Total (m)", value=6.0, step=0.5)
 d = h - rec
 
 st.sidebar.header("3. Cargas Distribuidas (Servicio)")
-w_cm = st.sidebar.number_input("w Muerta (ton/m)", value=1.5, step=0.5)
-w_cv = st.sidebar.number_input("w Viva (ton/m)", value=0.8, step=0.2)
+metodo_carga = st.sidebar.radio("Tipo de ingreso de carga:", ["Por Ancho Tributario (ton/m²)", "Directo Lineal (ton/m)"])
+
+if metodo_carga == "Por Ancho Tributario (ton/m²)":
+    col_tr1, col_tr2 = st.sidebar.columns(2)
+    ancho_t = col_tr1.number_input("Ancho Trib. (m)", value=3.0, step=0.5)
+    q_cm = col_tr2.number_input("CM (ton/m²)", value=0.50, step=0.05)
+    q_cv = st.sidebar.number_input("CV máxima (ton/m²)", value=0.20, step=0.05)
+    
+    w_cm = q_cm * ancho_t
+    w_cv = q_cv * ancho_t
+    st.sidebar.caption(f"↳ Carga lineal calculada: **wCM = {w_cm:.2f} t/m** | **wCV = {w_cv:.2f} t/m**")
+else:
+    col_d1, col_d2 = st.sidebar.columns(2)
+    w_cm = col_d1.number_input("w Muerta (ton/m)", value=1.5, step=0.2)
+    w_cv = col_d2.number_input("w Viva (ton/m)", value=0.8, step=0.2)
+
 w_facturada = (1.3 * w_cm) + (1.5 * w_cv)
 
 st.sidebar.header("4. Cargas Puntuales (Servicio)")
@@ -50,10 +74,12 @@ cargas_p_procesadas = []
 for i, cp in enumerate(st.session_state.cargas_p):
     st.sidebar.caption(f"Carga Puntual #{i+1}")
     c1, c2, c3 = st.sidebar.columns(3)
-    pos_val = min(float(cp["pos"]), float(L_total))
-    pos_p = c1.number_input("X (m)", value=pos_val, min_value=0.0, max_value=float(L_total), key=f"cp_x_{i}")
+    # Vinculación estricta de estado para evitar reseteos de distancia
+    pos_p = c1.number_input("X (m)", value=float(cp["pos"]), min_value=0.0, max_value=float(L_total), step=0.1, key=f"cp_x_{i}")
     cm_p  = c2.number_input("CM (t)", value=float(cp["cm"]), min_value=0.0, step=0.5, key=f"cp_cm_{i}")
     cv_p  = c3.number_input("CV (t)", value=float(cp["cv"]), min_value=0.0, step=0.5, key=f"cp_cv_{i}")
+    
+    st.session_state.cargas_p[i] = {"pos": pos_p, "cm": cm_p, "cv": cv_p}
     cargas_p_procesadas.append({"posicion": pos_p, "cm": cm_p, "cv": cv_p})
 
 st.sidebar.header("5. Configuración de Apoyos")
@@ -68,9 +94,9 @@ if col_ap2.button("❌ Apoyo"):
 apoyos_procesados = []
 for idx, ap in enumerate(st.session_state.apoyos):
     ca1, ca2 = st.sidebar.columns(2)
-    pos_ap_val = min(float(ap["posicion"]), float(L_total))
-    pos = ca1.number_input(f"X Apoyo {idx+1}", value=pos_ap_val, min_value=0.0, max_value=float(L_total), key=f"ap_x_{idx}")
-    tipo = ca2.selectbox(f"Tipo {idx+1}", ["Fijo/Rodillo", "Empotrado"], key=f"ap_t_{idx}")
+    pos = ca1.number_input(f"X Apoyo {idx+1}", value=min(float(ap["posicion"]), float(L_total)), min_value=0.0, max_value=float(L_total), key=f"ap_x_{idx}")
+    tipo = ca2.selectbox(f"Tipo {idx+1}", ["Fijo/Rodillo", "Empotrado"], index=0 if ap["tipo"]=="Fijo/Rodillo" else 1, key=f"ap_t_{idx}")
+    st.session_state.apoyos[idx] = {"posicion": pos, "tipo": tipo}
     apoyos_procesados.append({"posicion": pos, "tipo": tipo})
 
 st.sidebar.header("6. Refuerzo Longitudinal")
@@ -103,13 +129,11 @@ as_sup_colocado = (VARILLAS[v_sup_tipo]["area"] * v_sup_num) + as_bast_sup
 
 
 # =====================================================================
-# --- MOTOR DE CÁLCULO ESTRUCTURAL (RIGIDEZ REAL MÓDULO E) ---
+# --- MOTOR DE CÁLCULO ESTRUCTURAL ---
 # =====================================================================
-b_m = b / 100.0
-h_m = h / 100.0
+b_m, h_m = b / 100.0, h / 100.0
 A_m2 = b_m * h_m
 I_m4 = (b_m * h_m**3) / 12.0
-Ec_ton_m2 = (14000.0 * math.sqrt(fc)) * 10.0 # Conversión kg/cm² a ton/m²
 
 EA_real = Ec_ton_m2 * A_m2
 EI_real = Ec_ton_m2 * I_m4
@@ -155,10 +179,20 @@ for el_id in range(1, len(puntos_sistema)):
 Mu_max = max(abs(np.array(f_momento))) * 100000
 Vu_max = max(abs(np.array(f_cortante))) * 1000
 
-# --- CÁLCULOS NORMATIVOS (ESTRIBOS Y ACERO) ---
+
+# --- CÁLCULOS NORMATIVOS DE ESTRIBOS (DISTANCIAS Y PIEZAS) ---
 s_conf = min(d/4, 10.0 if Q_sismo==2 else (8*VARILLAS[v_inf_tipo]["diametro"] if Q_sismo==3 else 6*VARILLAS[v_inf_tipo]["diametro"]))
 s_cent = min(d/2, 25.0) if Q_sismo==2 else (min(d/3, 20.0) if Q_sismo==3 else min(d/4, 15.0))
 
+L_cm = L_total * 100.0
+L_conf_un_lado = min(2.0 * h, L_cm / 2.0) # Confinamiento 2h por norma
+pzas_ext = math.ceil(L_conf_un_lado / s_conf)
+
+L_centro_total = max(0.0, L_cm - (2.0 * L_conf_un_lado))
+pzas_cent = math.ceil(L_centro_total / s_cent) if L_centro_total > 0 else 0
+
+
+# --- CÁLCULOS A FLEXIÓN Y ALTERNATIVAS ---
 beta1 = 0.85 if fc <= 280 else max(0.85 - 0.05 * ((fc - 280) / 70), 0.65)
 as_min_form = (0.7 * math.sqrt(fc) / fy) * b * d
 rho_b = (beta1 * 0.85 * fc / fy) * (6000 / (6000 + fy))
@@ -167,11 +201,9 @@ as_max = rho_max * b * d
 
 a_real = ((as_inf_colocado - as_sup_colocado) * fy) / (0.85 * fc * b) if (as_inf_colocado - as_sup_colocado) > 0 else 0.1
 MR = 0.90 * ((as_inf_colocado - as_sup_colocado) * fy * (d - a_real / 2) + as_sup_colocado * fy * (d - rec))
-
 excepcion_133 = True if (as_inf_colocado < as_min_form and MR >= 1.33 * Mu_max) else False
 as_min_final = as_inf_colocado if excepcion_133 else as_min_form
 
-# Motor de optimización de alternativas
 opciones_validas = []
 for nombre_var, prop in VARILLAS.items():
     for n_barras in range(1, 5): 
@@ -206,15 +238,13 @@ flecha_perm = (L_total * 100) / 240
 
 
 # =====================================================================
-# --- INTERFAZ GRÁFICA (RENDERIZADO BLINDADO) ---
+# --- INTERFAZ GRÁFICA ---
 # =====================================================================
-
-# PANEL INMEDIATO (Estribos siempre visibles)
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Momento Máximo (Mu)", f"{Mu_max/100000:.2f} t·m")
 k2.metric("Cortante Máximo (Vu)", f"{Vu_max/1000:.2f} t")
-k3.metric("Estribos en Extremos", f"@{s_conf:.1f} cm", "Confinamiento NTC")
-k4.metric("Estribos en Centro", f"@{s_cent:.1f} cm", "Zona central")
+k3.metric("Estribos Extremos (2h)", f"{pzas_ext} pzas @ {s_conf:.1f} cm", f"En los primeros {L_conf_un_lado:.0f} cm c/lado")
+k4.metric("Estribos Centro", f"{pzas_cent} pzas @ {s_cent:.1f} cm", f"En los {L_centro_total:.0f} cm centrales")
 
 def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
     fig, ax = plt.subplots(figsize=(10, 2.2))
@@ -253,8 +283,8 @@ try:
     fig_m = plt.gcf()
     fig_m.set_size_inches(10.5, 2.8)
     st.pyplot(fig_m)
-except Exception:
-    st.warning("Diagrama de momentos en proceso de convergencia.")
+except Exception as e:
+    st.error(f"Error técnico de Anastruct en Diagrama de Momentos: `{e}`")
 
 try:
     plt.close('all')
@@ -263,8 +293,8 @@ try:
     fig_v = plt.gcf()
     fig_v.set_size_inches(10.5, 2.8)
     st.pyplot(fig_v)
-except Exception:
-    st.warning("Diagrama de cortantes en proceso de convergencia.")
+except Exception as e:
+    st.error(f"Error técnico de Anastruct en Diagrama de Cortantes: `{e}`")
 
 
 # --- PESTAÑAS INFERIORES ---
@@ -284,15 +314,15 @@ with t1:
         ax_s.set_xlim(-4, b+4); ax_s.set_ylim(-4, h+4); ax_s.axis("off")
         st.pyplot(fig_s)
     with col_det:
-        st.info(f"📍 **Estribos en Extremos (Confinamiento):** Cada **{s_conf:.1f} cm**")
-        st.success(f"🍃 **Estribos en Zona Central:** Cada **{s_cent:.1f} cm**")
-        st.write(f"**Acero Colocado:** Inferior = `{as_inf_colocado:.2f} cm²` | Superior = `{as_sup_colocado:.2f} cm²`")
+        st.info(f"📍 **Estribos en Extremos (Confinamiento):** `{pzas_ext} piezas` @ **{s_conf:.1f} cm** (cubriendo los primeros {L_conf_un_lado:.0f} cm de cada apoyo)")
+        st.success(f"🍃 **Estribos en Zona Central:** `{pzas_cent} piezas` @ **{s_cent:.1f} cm** (cubriendo los {L_centro_total:.0f} cm restantes del claro)")
+        st.write(f"**Acero Longitudinal:** Inferior = `{as_inf_colocado:.2f} cm²` | Superior = `{as_sup_colocado:.2f} cm²`")
 
 with t2:
     st.subheader("Armados Comerciales Factibles")
     if not df_optimo.empty:
         st.dataframe(df_optimo, use_container_width=True, hide_index=True)
-        st.success(f"🏆 **Opción Óptima (Más Ligera):** `{df_optimo.iloc[0]['Armado Propuesto']}` ({df_optimo.iloc[0]['Peso (kg/m)']} kg/m)")
+        st.success(f"🏆 **Opción Óptima:** `{df_optimo.iloc[0]['Armado Propuesto']}` ({df_optimo.iloc[0]['Peso (kg/m)']} kg/m)")
     else: st.warning("Ningún armado simple cubre la demanda. Aumenta la sección (b x h).")
 
 with t3:
