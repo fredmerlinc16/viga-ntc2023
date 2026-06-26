@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import math
 
-# FORZAR MODO HEADLESS (Vital para servidores web sin monitor)
+# FORZAR MODO HEADLESS PARA SERVIDORES WEB
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -14,7 +14,7 @@ from anastruct import SystemElements
 st.set_page_config(page_title="Software de Vigas Profesional NTC 2023", layout="wide")
 
 st.title("🏗️ Suite de Ingeniería de Vigas Continuas - NTC 2023")
-st.caption("Motor hiperestático con rigidez real (EI), Branson exacto y optimización comercial")
+st.caption("Motor hiperestático matricial con rigidez real (EI), Branson exacto y renderizado nativo")
 
 VARILLAS = {
     "#3 (3/8\")": {"diametro": 0.95, "area": 0.71, "peso": 0.56},
@@ -30,31 +30,31 @@ fc = st.sidebar.number_input("f'c - Concreto (kg/cm²)", value=250, step=50)
 fy = st.sidebar.number_input("fy - Acero Long. (kg/cm²)", value=4200, step=100)
 fyv = st.sidebar.number_input("fyv - Estribos (kg/cm²)", value=4200, step=100)
 
-# Módulo E sugerido por NTC (14000 * sqrt(fc) convertido de kg/cm2 a ton/m2)
 E_ntc_sugerido = float(round(14000 * math.sqrt(fc) * 10))
 Ec_ton_m2 = st.sidebar.number_input("Módulo de Elasticidad E (ton/m²)", value=E_ntc_sugerido, step=50000.0, format="%.0f")
-
 Q_sismo = st.sidebar.selectbox("Factor de Comportamiento Sísmico (Q)", [2, 3, 4], index=0)
 
 st.sidebar.header("2. Geometría")
 b = st.sidebar.number_input("Base, b (cm)", value=30, step=5)
 h = st.sidebar.number_input("Peralte, h (cm)", value=50, step=5)
 rec = st.sidebar.number_input("Recubrimiento mecánico, d' (cm)", value=5, step=1)
-L_total = st.sidebar.number_input("Longitud Total (m)", value=6.0, step=0.5)
+L_total = st.sidebar.number_input("Longitud Total del Claro (m)", value=6.0, step=0.5)
 d = h - rec
 
 st.sidebar.header("3. Cargas Distribuidas (Servicio)")
-metodo_carga = st.sidebar.radio("Tipo de ingreso de carga:", ["Por Ancho Tributario (ton/m²)", "Directo Lineal (ton/m)"])
+metodo_carga = st.sidebar.radio("Método de ingreso de carga:", ["Área Tributaria Manual (m²)", "Directo Lineal (ton/m)"])
 
-if metodo_carga == "Por Ancho Tributario (ton/m²)":
+if metodo_carga == "Área Tributaria Manual (m²)":
     col_tr1, col_tr2 = st.sidebar.columns(2)
-    ancho_t = col_tr1.number_input("Ancho Trib. (m)", value=3.0, step=0.5)
+    area_trib = col_tr1.number_input("Área Tributaria (m²)", value=18.0, step=1.0)
     q_cm = col_tr2.number_input("CM (ton/m²)", value=0.50, step=0.05)
     q_cv = st.sidebar.number_input("CV máxima (ton/m²)", value=0.20, step=0.05)
     
-    w_cm = q_cm * ancho_t
-    w_cv = q_cv * ancho_t
-    st.sidebar.caption(f"↳ Carga lineal calculada: **wCM = {w_cm:.2f} t/m** | **wCV = {w_cv:.2f} t/m**")
+    # Deducción de carga lineal en la viga: (Área * Presión) / Longitud
+    ancho_equivalente = area_trib / L_total if L_total > 0 else 0
+    w_cm = q_cm * ancho_equivalente
+    w_cv = q_cv * ancho_equivalent
+    st.sidebar.caption(f"↳ Ancho trib. deducido: **{ancho_equivalente:.2f} m** | **wCM = {w_cm:.2f} t/m** | **wCV = {w_cv:.2f} t/m**")
 else:
     col_d1, col_d2 = st.sidebar.columns(2)
     w_cm = col_d1.number_input("w Muerta (ton/m)", value=1.5, step=0.2)
@@ -74,11 +74,9 @@ cargas_p_procesadas = []
 for i, cp in enumerate(st.session_state.cargas_p):
     st.sidebar.caption(f"Carga Puntual #{i+1}")
     c1, c2, c3 = st.sidebar.columns(3)
-    # Vinculación estricta de estado para evitar reseteos de distancia
     pos_p = c1.number_input("X (m)", value=float(cp["pos"]), min_value=0.0, max_value=float(L_total), step=0.1, key=f"cp_x_{i}")
     cm_p  = c2.number_input("CM (t)", value=float(cp["cm"]), min_value=0.0, step=0.5, key=f"cp_cm_{i}")
     cv_p  = c3.number_input("CV (t)", value=float(cp["cv"]), min_value=0.0, step=0.5, key=f"cp_cv_{i}")
-    
     st.session_state.cargas_p[i] = {"pos": pos_p, "cm": cm_p, "cv": cv_p}
     cargas_p_procesadas.append({"posicion": pos_p, "cm": cm_p, "cv": cv_p})
 
@@ -138,6 +136,7 @@ I_m4 = (b_m * h_m**3) / 12.0
 EA_real = Ec_ton_m2 * A_m2
 EI_real = Ec_ton_m2 * I_m4
 
+# Mapeo de discretización fina para diagramas perfectos
 puntos_criticos = [0.0, float(L_total)]
 for ap in apoyos_procesados: puntos_criticos.append(round(float(ap["posicion"]), 4))
 for cp in cargas_p_procesadas: puntos_criticos.append(round(float(cp["posicion"]), 4))
@@ -169,30 +168,32 @@ for px, pu_tot in cargas_nodo.items():
 
 ss.solve()
 
-f_momento, f_cortante = [0.0], [0.0]
+# --- EXTRACCIÓN DE VECTORES DE ESFUERZO PARA RENDER PROPIO ---
+x_plot, m_plot, v_plot, u_plot = [], [], [], []
 for el_id in range(1, len(puntos_sistema)):
     res = ss.get_element_results(element_id=el_id)
     if res:
-        if res.get('M') is not None: f_momento.extend(res['M'])
-        if res.get('Q') is not None: f_cortante.extend(res['Q'])
+        # Anastruct entrega los vectores fragmentados por elemento
+        x_plot.extend(res['length'])
+        m_plot.extend(res['M'])
+        v_plot.extend(res['Q'])
+        u_plot.extend(res['w'])
 
-Mu_max = max(abs(np.array(f_momento))) * 100000
-Vu_max = max(abs(np.array(f_cortante))) * 1000
+Mu_max = max(abs(np.array(m_plot))) * 100000 if m_plot else 10000
+Vu_max = max(abs(np.array(v_plot))) * 1000 if v_plot else 1000
 
 
-# --- CÁLCULOS NORMATIVOS DE ESTRIBOS (DISTANCIAS Y PIEZAS) ---
+# --- CÁLCULOS NORMATIVOS DE ESTRIBOS ---
 s_conf = min(d/4, 10.0 if Q_sismo==2 else (8*VARILLAS[v_inf_tipo]["diametro"] if Q_sismo==3 else 6*VARILLAS[v_inf_tipo]["diametro"]))
 s_cent = min(d/2, 25.0) if Q_sismo==2 else (min(d/3, 20.0) if Q_sismo==3 else min(d/4, 15.0))
 
 L_cm = L_total * 100.0
-L_conf_un_lado = min(2.0 * h, L_cm / 2.0) # Confinamiento 2h por norma
+L_conf_un_lado = min(2.0 * h, L_cm / 2.0) 
 pzas_ext = math.ceil(L_conf_un_lado / s_conf)
-
 L_centro_total = max(0.0, L_cm - (2.0 * L_conf_un_lado))
 pzas_cent = math.ceil(L_centro_total / s_cent) if L_centro_total > 0 else 0
 
-
-# --- CÁLCULOS A FLEXIÓN Y ALTERNATIVAS ---
+# --- CÁLCULOS A FLEXIÓN Y BRANSON ---
 beta1 = 0.85 if fc <= 280 else max(0.85 - 0.05 * ((fc - 280) / 70), 0.65)
 as_min_form = (0.7 * math.sqrt(fc) / fy) * b * d
 rho_b = (beta1 * 0.85 * fc / fy) * (6000 / (6000 + fy))
@@ -222,7 +223,6 @@ for nombre_var, prop in VARILLAS.items():
 df_optimo = pd.DataFrame(opciones_validas)
 if not df_optimo.empty: df_optimo = df_optimo.sort_values(by="Peso (kg/m)", ascending=True)
 
-# Branson
 Ig = (b * h**3) / 12
 Mcr = ((2.0 * math.sqrt(fc)) * Ig) / (h / 2)
 Ma = Mu_max / 1.3 if Mu_max > 0 else 0.1
@@ -243,58 +243,90 @@ flecha_perm = (L_total * 100) / 240
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Momento Máximo (Mu)", f"{Mu_max/100000:.2f} t·m")
 k2.metric("Cortante Máximo (Vu)", f"{Vu_max/1000:.2f} t")
-k3.metric("Estribos Extremos (2h)", f"{pzas_ext} pzas @ {s_conf:.1f} cm", f"En los primeros {L_conf_un_lado:.0f} cm c/lado")
+k3.metric("Estribos Extremos (2h)", f"{pzas_ext} pzas @ {s_conf:.1f} cm", f"En primeros {L_conf_un_lado:.0f} cm c/apoyo")
 k4.metric("Estribos Centro", f"{pzas_cent} pzas @ {s_cent:.1f} cm", f"En los {L_centro_total:.0f} cm centrales")
 
 def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
-    fig, ax = plt.subplots(figsize=(10, 2.2))
-    ax.plot([0, L], [0, 0], color='#1E293B', linewidth=9, zorder=3)
+    fig, ax = plt.subplots(figsize=(10, 2.0))
+    ax.plot([0, L], [0, 0], color='#1E293B', linewidth=8, zorder=3)
     for ap in apoyos:
         x = ap['posicion']
         if ap['tipo'] == 'Empotrado':
             ax.plot([x, x], [-0.35, 0.35], color='#0F172A', linewidth=5, zorder=4)
             for dy in np.linspace(-0.3, 0.3, 6): ax.plot([x, x - (0.18 if x > L/2 else -0.18)], [dy, dy - 0.1], color='#64748B', lw=1.5)
         else:
-            ax.plot(x, -0.05, marker='^', markersize=15, color='#059669', zorder=4)
-            ax.plot(x, -0.22, marker='s', markersize=7, color='#059669', zorder=4)
+            ax.plot(x, -0.05, marker='^', markersize=14, color='#059669', zorder=4)
+            ax.plot(x, -0.22, marker='s', markersize=6, color='#059669', zorder=4)
     if w_dist > 0:
-        yt = 0.55
+        yt = 0.50
         ax.plot([0, L], [yt, yt], color='#2563EB', linewidth=1.5)
         for x_fl in np.linspace(0.1, L-0.1, max(int(L*2.2), 4)):
-            ax.annotate('', xy=(x_fl, 0.06), xytext=(x_fl, yt), arrowprops=dict(arrowstyle="->", color='#3B82F6', lw=1.2))
-        ax.text(L/2, yt + 0.08, f"wu = {w_dist:.2f} t/m", ha='center', va='bottom', color='#1D4ED8', fontweight='bold', fontsize=9.5, bbox=dict(boxstyle='round,pad=0.2', facecolor='#EFF6FF', edgecolor='#BFDBFE'))
+            ax.annotate('', xy=(x_fl, 0.05), xytext=(x_fl, yt), arrowprops=dict(arrowstyle="->", color='#3B82F6', lw=1.2))
+        ax.text(L/2, yt + 0.05, f"wu = {w_dist:.2f} t/m", ha='center', va='bottom', color='#1D4ED8', fontweight='bold', fontsize=9)
     for cp in cargas_p:
         xp = cp['posicion']
         pu_val = (1.3 * cp['cm']) + (1.5 * cp['cv'])
-        ax.annotate('', xy=(xp, 0.06), xytext=(xp, 1.1), arrowprops=dict(facecolor='#DC2626', edgecolor='#B91C1C', width=3, headwidth=8), zorder=6)
-        ax.text(xp, 1.15, f"Pu={pu_val:.2f}t\n({xp}m)", ha='center', va='bottom', color='#991B1B', fontweight='bold', fontsize=8.5, bbox=dict(boxstyle='round,pad=0.2', facecolor='#FEF2F2', edgecolor='#FECACA'))
-    ax.set_xlim(-L*0.06, L*1.06); ax.set_ylim(-0.45, 1.6); ax.axis('off')
+        ax.annotate('', xy=(xp, 0.05), xytext=(xp, 1.0), arrowprops=dict(facecolor='#DC2626', edgecolor='#B91C1C', width=2.5, headwidth=7), zorder=6)
+        ax.text(xp, 1.05, f"Pu={pu_val:.2f}t\n({xp}m)", ha='center', va='bottom', color='#991B1B', fontweight='bold', fontsize=8)
+    ax.set_xlim(-L*0.05, L*1.05); ax.set_ylim(-0.4, 1.4); ax.axis('off')
     plt.tight_layout()
     return fig
 
 st.subheader("📍 Esquema del Sistema Estructural")
 st.pyplot(generar_esquema_visual(L_total, apoyos_procesados, w_facturada, cargas_p_procesadas))
 
-st.subheader("📊 Esfuerzos Internos")
-try:
-    plt.close('all')
-    st.caption("Diagrama de Momentos Flectores (ton·m)")
-    ss.plot_bending_moment(show=False)
-    fig_m = plt.gcf()
-    fig_m.set_size_inches(10.5, 2.8)
-    st.pyplot(fig_m)
-except Exception as e:
-    st.error(f"Error técnico de Anastruct en Diagrama de Momentos: `{e}`")
+st.subheader("📊 Esfuerzos Internos y Deformación (Motor Gráfico NTC)")
 
-try:
-    plt.close('all')
-    st.caption("Diagrama de Fuerzas Cortantes (ton)")
-    ss.plot_shear_force(show=False)
-    fig_v = plt.gcf()
-    fig_v.set_size_inches(10.5, 2.8)
-    st.pyplot(fig_v)
-except Exception as e:
-    st.error(f"Error técnico de Anastruct en Diagrama de Cortantes: `{e}`")
+# --- DIBUJADO NATIVO MATPLOTLIB (INMUNE A ANASTRUCT) ---
+if x_plot:
+    col_d_left, col_d_right = st.columns(2)
+    
+    with col_d_left:
+        # DIAGRAMA DE MOMENTOS (Convención Mexicana: Negativos arriba)
+        fig_m, ax_m = plt.subplots(figsize=(6, 2.5))
+        m_arr = np.array(m_plot)
+        ax_m.plot(x_plot, -m_arr, color="#DC2626", lw=2)
+        ax_m.fill_between(x_plot, 0, -m_arr, color="#FEE2E2", alpha=0.6)
+        ax_m.axhline(0, color="black", lw=0.8, ls="--")
+        ax_m.set_title("Momentos Flectores (ton·m) [- Arriba / + Abajo]", fontsize=9, fontweight="bold")
+        ax_m.set_ylabel("M (t·m)", fontsize=8)
+        ax_m.grid(True, ls=":", alpha=0.6)
+        
+        # Etiquetar picos
+        idx_max = np.argmax(abs(m_arr))
+        ax_m.annotate(f"{m_arr[idx_max]:.2f}", xy=(x_plot[idx_max], -m_arr[idx_max]), 
+                      xytext=(x_plot[idx_max], -m_arr[idx_max]*1.15),
+                      arrowprops=dict(arrowstyle="->", lw=0.8), ha="center", fontsize=8, fontweight="bold")
+        plt.tight_layout(); st.pyplot(fig_m)
+
+    with col_d_right:
+        # DIAGRAMA DE CORTANTES
+        fig_v, ax_v = plt.subplots(figsize=(6, 2.5))
+        v_arr = np.array(v_plot)
+        ax_v.plot(x_plot, v_arr, color="#2563EB", lw=2)
+        ax_v.fill_between(x_plot, 0, v_arr, color="#DBEAFE", alpha=0.6)
+        ax_v.axhline(0, color="black", lw=0.8, ls="--")
+        ax_v.set_title("Fuerzas Cortantes (ton)", fontsize=9, fontweight="bold")
+        ax_v.set_ylabel("V (t)", fontsize=8)
+        ax_v.grid(True, ls=":", alpha=0.6)
+        
+        idx_v = np.argmax(abs(v_arr))
+        ax_v.annotate(f"{v_arr[idx_v]:.2f} t", xy=(x_plot[idx_v], v_arr[idx_v]), 
+                      xytext=(x_plot[idx_v], v_arr[idx_v]*1.15),
+                      arrowprops=dict(arrowstyle="->", lw=0.8), ha="center", fontsize=8, fontweight="bold")
+        plt.tight_layout(); st.pyplot(fig_v)
+
+    # DIAGRAMA DE DEFLEXIÓN ELÁSTICA
+    fig_u, ax_u = plt.subplots(figsize=(12, 1.8))
+    u_arr_mm = np.array(u_plot) * 1000.0 # Convertir m a milímetros
+    ax_u.plot(x_plot, u_arr_mm, color="#059669", lw=1.8)
+    ax_u.fill_between(x_plot, 0, u_arr_mm, color="#D1FAE5", alpha=0.5)
+    ax_u.axhline(0, color="black", lw=0.8)
+    ax_u.invert_yaxis() # Flechas van hacia abajo en la realidad física
+    ax_u.set_title("Deformación Elástica Instantánea (mm) [Eje invertido hacia la gravedad]", fontsize=9, fontweight="bold")
+    ax_u.set_ylabel("Flecha (mm)", fontsize=8); ax_u.set_xlabel("Longitud de viga (m)", fontsize=8)
+    ax_u.grid(True, ls=":", alpha=0.6)
+    plt.tight_layout(); st.pyplot(fig_u)
 
 
 # --- PESTAÑAS INFERIORES ---
@@ -314,8 +346,8 @@ with t1:
         ax_s.set_xlim(-4, b+4); ax_s.set_ylim(-4, h+4); ax_s.axis("off")
         st.pyplot(fig_s)
     with col_det:
-        st.info(f"📍 **Estribos en Extremos (Confinamiento):** `{pzas_ext} piezas` @ **{s_conf:.1f} cm** (cubriendo los primeros {L_conf_un_lado:.0f} cm de cada apoyo)")
-        st.success(f"🍃 **Estribos en Zona Central:** `{pzas_cent} piezas` @ **{s_cent:.1f} cm** (cubriendo los {L_centro_total:.0f} cm restantes del claro)")
+        st.info(f"📍 **Estribos en Extremos (Confinamiento):** `{pzas_ext} piezas` @ **{s_conf:.1f} cm** (En los primeros {L_conf_un_lado:.0f} cm de cada apoyo)")
+        st.success(f"🍃 **Estribos en Zona Central:** `{pzas_cent} piezas` @ **{s_cent:.1f} cm** (En los {L_centro_total:.0f} cm restantes del claro)")
         st.write(f"**Acero Longitudinal:** Inferior = `{as_inf_colocado:.2f} cm²` | Superior = `{as_sup_colocado:.2f} cm²`")
 
 with t2:
