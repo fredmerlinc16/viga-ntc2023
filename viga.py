@@ -8,8 +8,8 @@ from anastruct import SystemElements
 # 1. Configuración de Página
 st.set_page_config(page_title="Software de Vigas Profesional NTC 2023", layout="wide")
 
-st.title("🏗️ Suite de Ingeniería de Vigas Continuas y Bastones - NTC 2023")
-st.caption("Análisis hiperestático en tiempo real con motor visual de cargas, Branson exacto y reglas constructivas")
+st.title("🏗️ Suite de Ingeniería de Vigas Continuas - NTC 2023")
+st.caption("Motor hiperestático con rigidez real (EI), Branson exacto y optimización comercial")
 
 VARILLAS = {
     "#3 (3/8\")": {"diametro": 0.95, "area": 0.71, "peso": 0.56},
@@ -39,8 +39,7 @@ w_cv = st.sidebar.number_input("w Viva (ton/m)", value=0.8, step=0.2)
 w_facturada = (1.3 * w_cm) + (1.5 * w_cv)
 
 st.sidebar.header("4. Cargas Puntuales (Servicio)")
-if 'cargas_p' not in st.session_state:
-    st.session_state.cargas_p = []
+if 'cargas_p' not in st.session_state: st.session_state.cargas_p = []
 
 col_cp1, col_cp2 = st.sidebar.columns(2)
 if col_cp1.button("➕ Puntual"): st.session_state.cargas_p.append({"pos": round(L_total/2, 2), "cm": 1.0, "cv": 0.5})
@@ -85,8 +84,6 @@ v_sup_num = col_as4.number_input("Cant. Sup", value=2, min_value=1, max_value=4)
 
 activar_bast_sup = st.sidebar.checkbox("Bastones Superiores")
 as_bast_sup = 0.0
-v_bs_tipo = "#4 (1/2\")"
-v_bs_num = 0
 if activar_bast_sup:
     cb1, cb2 = st.sidebar.columns(2)
     v_bs_tipo = cb1.selectbox("Varilla Bast. Sup", list(VARILLAS.keys()), index=2)
@@ -95,8 +92,6 @@ if activar_bast_sup:
 
 activar_bast_inf = st.sidebar.checkbox("Bastones Inferiores")
 as_bast_inf = 0.0
-v_bi_tipo = "#4 (1/2\")"
-v_bi_num = 0
 if activar_bast_inf:
     cb3, cb4 = st.sidebar.columns(2)
     v_bi_tipo = cb3.selectbox("Varilla Bast. Inf", list(VARILLAS.keys()), index=2)
@@ -107,13 +102,24 @@ as_inf_colocado = (VARILLAS[v_inf_tipo]["area"] * v_inf_num) + as_bast_inf
 as_sup_colocado = (VARILLAS[v_sup_tipo]["area"] * v_sup_num) + as_bast_sup
 
 
-# --- SOLVER MATRICIAL ANASTRUCT ---
+# =====================================================================
+# --- MOTOR DE CÁLCULO ESTRUCTURAL (RIGIDEZ REAL MÓDULO E) ---
+# =====================================================================
+b_m = b / 100.0
+h_m = h / 100.0
+A_m2 = b_m * h_m
+I_m4 = (b_m * h_m**3) / 12.0
+Ec_ton_m2 = (14000.0 * math.sqrt(fc)) * 10.0 # Conversión kg/cm² a ton/m²
+
+EA_real = Ec_ton_m2 * A_m2
+EI_real = Ec_ton_m2 * I_m4
+
 puntos_criticos = [0.0, float(L_total)]
 for ap in apoyos_procesados: puntos_criticos.append(round(float(ap["posicion"]), 4))
 for cp in cargas_p_procesadas: puntos_criticos.append(round(float(cp["posicion"]), 4))
-
 puntos_sistema = sorted(list(set(puntos_criticos)))
-ss = SystemElements()
+
+ss = SystemElements(EA=EA_real, EI=EI_real)
 
 for i in range(len(puntos_sistema)-1):
     ss.add_element(location=[[puntos_sistema[i], 0], [puntos_sistema[i+1], 0]])
@@ -135,13 +141,11 @@ for cp in cargas_p_procesadas:
 
 for px, pu_tot in cargas_nodo.items():
     n_id = ss.find_node_id([px, 0])
-    if n_id and pu_tot > 0:
-        ss.point_load(node_id=n_id, Fx=0, Fy=-pu_tot)
+    if n_id and pu_tot > 0: ss.point_load(node_id=n_id, Fx=0, Fy=-pu_tot)
 
 ss.solve()
 
-f_momento = [0.0]
-f_cortante = [0.0]
+f_momento, f_cortante = [0.0], [0.0]
 for el_id in range(1, len(puntos_sistema)):
     res = ss.get_element_results(element_id=el_id)
     if res:
@@ -151,84 +155,12 @@ for el_id in range(1, len(puntos_sistema)):
 Mu_max = max(abs(np.array(f_momento))) * 100000
 Vu_max = max(abs(np.array(f_cortante))) * 1000
 
+# --- CÁLCULOS NORMATIVOS (ESTRIBOS Y ACERO) ---
+s_conf = min(d/4, 10.0 if Q_sismo==2 else (8*VARILLAS[v_inf_tipo]["diametro"] if Q_sismo==3 else 6*VARILLAS[v_inf_tipo]["diametro"]))
+s_cent = min(d/2, 25.0) if Q_sismo==2 else (min(d/3, 20.0) if Q_sismo==3 else min(d/4, 15.0))
 
-# --- ESQUEMA FÍSICO DE LA VIGA ---
-def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
-    fig, ax = plt.subplots(figsize=(10, 2.2))
-    ax.plot([0, L], [0, 0], color='#1E293B', linewidth=9, zorder=3)
-    
-    for ap in apoyos:
-        x = ap['posicion']
-        if ap['tipo'] == 'Empotrado':
-            ax.plot([x, x], [-0.35, 0.35], color='#0F172A', linewidth=5, zorder=4)
-            for dy in np.linspace(-0.3, 0.3, 6):
-                ax.plot([x, x - (0.18 if x > L/2 else -0.18)], [dy, dy - 0.1], color='#64748B', linewidth=1.5)
-        else:
-            ax.plot(x, -0.05, marker='^', markersize=15, color='#059669', zorder=4)
-            ax.plot(x, -0.22, marker='s', markersize=7, color='#059669', zorder=4)
-
-    if w_dist > 0:
-        yt = 0.55
-        ax.plot([0, L], [yt, yt], color='#2563EB', linewidth=1.5)
-        for x_fl in np.linspace(0.1, L-0.1, max(int(L*2.2), 4)):
-            ax.annotate('', xy=(x_fl, 0.06), xytext=(x_fl, yt),
-                        arrowprops=dict(arrowstyle="->", color='#3B82F6', lw=1.2))
-        ax.text(L/2, yt + 0.08, f"wu = {w_dist:.2f} t/m", ha='center', va='bottom', 
-                color='#1D4ED8', fontweight='bold', fontsize=9.5, 
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='#EFF6FF', edgecolor='#BFDBFE'))
-
-    for cp in cargas_p:
-        xp = cp['posicion']
-        pu_val = (1.3 * cp['cm']) + (1.5 * cp['cv'])
-        ax.annotate('', xy=(xp, 0.06), xytext=(xp, 1.1),
-                    arrowprops=dict(facecolor='#DC2626', edgecolor='#B91C1C', width=3, headwidth=8), zorder=6)
-        ax.text(xp, 1.15, f"Pu={pu_val:.2f}t\n({xp}m)", ha='center', va='bottom', 
-                color='#991B1B', fontweight='bold', fontsize=8.5,
-                bbox=dict(boxstyle='round,pad=0.2', facecolor='#FEF2F2', edgecolor='#FECACA'))
-
-    ax.set_xlim(-L*0.06, L*1.06)
-    ax.set_ylim(-0.45, 1.6)
-    ax.axis('off')
-    plt.tight_layout()
-    return fig
-
-
-# --- DASHBOARD PRINCIPAL ---
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Momento Máximo de Diseño", f"{Mu_max/100000:.2f} ton·m")
-k2.metric("Cortante Máximo de Diseño", f"{Vu_max/1000:.2f} ton")
-k3.metric("Carga Distribuida (wu)", f"{w_facturada:.2f} ton/m")
-k4.metric("Cargas Puntuales Activas", f"{len(cargas_p_procesadas)}")
-
-st.subheader("📍 Esquema del Sistema Estructural")
-st.pyplot(generar_esquema_visual(L_total, apoyos_procesados, w_facturada, cargas_p_procesadas))
-
-# --- MOTOR GRÁFICO DE DIAGRAMAS A PRUEBA DE FALLOS ---
-st.subheader("📊 Diagramas de Esfuerzos Internos")
-
-try:
-    st.markdown("**1. Diagrama de Momentos Flectores (ton·m)**")
-    fig_m = ss.plot_bending_moment(show=False)
-    if fig_m is None: fig_m = plt.gcf()
-    fig_m.set_size_inches(10.5, 3.2)
-    st.pyplot(fig_m)
-    plt.close(fig_m)
-
-    st.markdown("**2. Diagrama de Fuerzas Cortantes (ton)**")
-    fig_v = ss.plot_shear_force(show=False)
-    if fig_v is None: fig_v = plt.gcf()
-    fig_v.set_size_inches(10.5, 3.2)
-    st.pyplot(fig_v)
-    plt.close(fig_v)
-
-except Exception as e:
-    st.error(f"Error estructural: No se pudieron trazar los esfuerzos. Verifica distancias lógicas entre apoyos.")
-
-
-# --- CÁLCULOS NORMATIVOS Y DE OPTIMIZACIÓN ---
 beta1 = 0.85 if fc <= 280 else max(0.85 - 0.05 * ((fc - 280) / 70), 0.65)
 as_min_form = (0.7 * math.sqrt(fc) / fy) * b * d
-
 rho_b = (beta1 * 0.85 * fc / fy) * (6000 / (6000 + fy))
 rho_max = rho_b * (0.75 if Q_sismo == 2 else (0.50 if Q_sismo == 3 else 0.35))
 as_max = rho_max * b * d
@@ -236,26 +168,17 @@ as_max = rho_max * b * d
 a_real = ((as_inf_colocado - as_sup_colocado) * fy) / (0.85 * fc * b) if (as_inf_colocado - as_sup_colocado) > 0 else 0.1
 MR = 0.90 * ((as_inf_colocado - as_sup_colocado) * fy * (d - a_real / 2) + as_sup_colocado * fy * (d - rec))
 
-excepcion_133 = False
-if as_inf_colocado < as_min_form and MR >= 1.33 * Mu_max:
-    excepcion_133 = True
-    as_min_final = as_inf_colocado 
-else:
-    as_min_final = as_min_form
+excepcion_133 = True if (as_inf_colocado < as_min_form and MR >= 1.33 * Mu_max) else False
+as_min_final = as_inf_colocado if excepcion_133 else as_min_form
 
-# Algoritmo de alternativas de acero
+# Motor de optimización de alternativas
 opciones_validas = []
 for nombre_var, prop in VARILLAS.items():
     for n_barras in range(1, 5): 
         as_prueba = prop["area"] * n_barras
         a_p = (as_prueba * fy) / (0.85 * fc * b)
         MR_p = 0.90 * as_prueba * fy * (d - a_p / 2)
-        
-        c_min = (as_prueba >= as_min_form) or (MR_p >= 1.33 * Mu_max)
-        c_max = as_prueba <= as_max
-        c_res = MR_p >= Mu_max
-        
-        if c_min and c_max and c_res:
+        if ((as_prueba >= as_min_form) or (MR_p >= 1.33 * Mu_max)) and (as_prueba <= as_max) and (MR_p >= Mu_max):
             opciones_validas.append({
                 "Armado Propuesto": f"{n_barras} var. {nombre_var}",
                 "Área (cm²)": round(as_prueba, 2),
@@ -265,8 +188,7 @@ for nombre_var, prop in VARILLAS.items():
             })
 
 df_optimo = pd.DataFrame(opciones_validas)
-if not df_optimo.empty:
-    df_optimo = df_optimo.sort_values(by="Peso (kg/m)", ascending=True)
+if not df_optimo.empty: df_optimo = df_optimo.sort_values(by="Peso (kg/m)", ascending=True)
 
 # Branson
 Ig = (b * h**3) / 12
@@ -277,21 +199,77 @@ rho_inf = as_inf_colocado / (b * d) if (b * d) > 0 else 0.01
 k_br = math.sqrt((rho_inf * n_rel)**2 + 2 * rho_inf * n_rel) - (rho_inf * n_rel)
 Icr = (b * (k_br * d)**3) / 3 + n_rel * as_inf_colocado * (d - k_br * d)**2
 Ie = min(((Mcr / Ma)**3) * Ig + (1 - (Mcr / Ma)**3) * Icr, Ig) if Ma > Mcr else Ig
-
 flecha_inst = (5 * ((w_cm + w_cv)*10) * (L_total*100)**4) / (384 * (14000 * math.sqrt(fc)) * Ie)
 rho_p = as_sup_colocado / (b * d) if (b * d) > 0 else 0.01
 flecha_diferida = flecha_inst * (1 + (2.0 / (1 + 50 * rho_p)))
 flecha_perm = (L_total * 100) / 240
 
 
-# --- PESTAÑAS DE REVISIÓN Y DESPIECE ---
+# =====================================================================
+# --- INTERFAZ GRÁFICA (RENDERIZADO BLINDADO) ---
+# =====================================================================
+
+# PANEL INMEDIATO (Estribos siempre visibles)
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Momento Máximo (Mu)", f"{Mu_max/100000:.2f} t·m")
+k2.metric("Cortante Máximo (Vu)", f"{Vu_max/1000:.2f} t")
+k3.metric("Estribos en Extremos", f"@{s_conf:.1f} cm", "Confinamiento NTC")
+k4.metric("Estribos en Centro", f"@{s_cent:.1f} cm", "Zona central")
+
+def generar_esquema_visual(L, apoyos, w_dist, cargas_p):
+    fig, ax = plt.subplots(figsize=(10, 2.2))
+    ax.plot([0, L], [0, 0], color='#1E293B', linewidth=9, zorder=3)
+    for ap in apoyos:
+        x = ap['posicion']
+        if ap['tipo'] == 'Empotrado':
+            ax.plot([x, x], [-0.35, 0.35], color='#0F172A', linewidth=5, zorder=4)
+            for dy in np.linspace(-0.3, 0.3, 6): ax.plot([x, x - (0.18 if x > L/2 else -0.18)], [dy, dy - 0.1], color='#64748B', lw=1.5)
+        else:
+            ax.plot(x, -0.05, marker='^', markersize=15, color='#059669', zorder=4)
+            ax.plot(x, -0.22, marker='s', markersize=7, color='#059669', zorder=4)
+    if w_dist > 0:
+        yt = 0.55
+        ax.plot([0, L], [yt, yt], color='#2563EB', linewidth=1.5)
+        for x_fl in np.linspace(0.1, L-0.1, max(int(L*2.2), 4)):
+            ax.annotate('', xy=(x_fl, 0.06), xytext=(x_fl, yt), arrowprops=dict(arrowstyle="->", color='#3B82F6', lw=1.2))
+        ax.text(L/2, yt + 0.08, f"wu = {w_dist:.2f} t/m", ha='center', va='bottom', color='#1D4ED8', fontweight='bold', fontsize=9.5, bbox=dict(boxstyle='round,pad=0.2', facecolor='#EFF6FF', edgecolor='#BFDBFE'))
+    for cp in cargas_p:
+        xp = cp['posicion']
+        pu_val = (1.3 * cp['cm']) + (1.5 * cp['cv'])
+        ax.annotate('', xy=(xp, 0.06), xytext=(xp, 1.1), arrowprops=dict(facecolor='#DC2626', edgecolor='#B91C1C', width=3, headwidth=8), zorder=6)
+        ax.text(xp, 1.15, f"Pu={pu_val:.2f}t\n({xp}m)", ha='center', va='bottom', color='#991B1B', fontweight='bold', fontsize=8.5, bbox=dict(boxstyle='round,pad=0.2', facecolor='#FEF2F2', edgecolor='#FECACA'))
+    ax.set_xlim(-L*0.06, L*1.06); ax.set_ylim(-0.45, 1.6); ax.axis('off')
+    plt.tight_layout()
+    return fig
+
+st.subheader("📍 Esquema del Sistema Estructural")
+st.pyplot(generar_esquema_visual(L_total, apoyos_procesados, w_facturada, cargas_p_procesadas))
+
+st.subheader("📊 Esfuerzos Internos")
+try:
+    plt.close('all')
+    st.caption("Diagrama de Momentos Flectores (ton·m)")
+    ss.plot_bending_moment(show=False)
+    fig_m = plt.gcf()
+    fig_m.set_size_inches(10.5, 2.8)
+    st.pyplot(fig_m)
+except Exception:
+    st.warning("Diagrama de momentos en proceso de convergencia.")
+
+try:
+    plt.close('all')
+    st.caption("Diagrama de Fuerzas Cortantes (ton)")
+    ss.plot_shear_force(show=False)
+    fig_v = plt.gcf()
+    fig_v.set_size_inches(10.5, 2.8)
+    st.pyplot(fig_v)
+except Exception:
+    st.warning("Diagrama de cortantes en proceso de convergencia.")
+
+
+# --- PESTAÑAS INFERIORES ---
 st.markdown("---")
-t1, t2, t3, t4 = st.tabs([
-    "📋 Despiece de Armado", 
-    "💡 Alternativas de Acero", 
-    "⚖️ Revisión Normativa NTC", 
-    "📐 Deflexiones e Inercias"
-])
+t1, t2, t3, t4 = st.tabs(["📋 Despiece de Armado", "💡 Alternativas de Acero", "⚖️ Revisión Normativa NTC", "📐 Deflexiones e Inercias"])
 
 with t1:
     col_sect, col_det = st.columns([1, 2])
@@ -299,32 +277,23 @@ with t1:
         fig_s, ax_s = plt.subplots(figsize=(4, 4.5))
         ax_s.add_patch(plt.Rectangle((0, 0), b, h, color="#E2E8F0"))
         ax_s.add_patch(plt.Rectangle((rec, rec), b-2*rec, h-2*rec, fill=False, ec="#2563EB", lw=2))
-        
         x_in = np.linspace(rec, b-rec, v_inf_num) if v_inf_num > 1 else [b/2]
         for xc in x_in: ax_s.scatter(xc, rec, color="#DC2626", s=150, zorder=5)
-        
         x_su = np.linspace(rec, b-rec, v_sup_num) if v_sup_num > 1 else [b/2]
         for xc in x_su: ax_s.scatter(xc, h-rec, color="#991B1B", s=120, zorder=5)
-        
         ax_s.set_xlim(-4, b+4); ax_s.set_ylim(-4, h+4); ax_s.axis("off")
         st.pyplot(fig_s)
-        
     with col_det:
-        s_conf = min(d/4, 10.0 if Q_sismo==2 else (8*VARILLAS[v_inf_tipo]["diametro"] if Q_sismo==3 else 6*VARILLAS[v_inf_tipo]["diametro"]))
-        s_cent = min(d/2, 25.0) if Q_sismo==2 else (min(d/3, 20.0) if Q_sismo==3 else min(d/4, 15.0))
         st.info(f"📍 **Estribos en Extremos (Confinamiento):** Cada **{s_conf:.1f} cm**")
         st.success(f"🍃 **Estribos en Zona Central:** Cada **{s_cent:.1f} cm**")
         st.write(f"**Acero Colocado:** Inferior = `{as_inf_colocado:.2f} cm²` | Superior = `{as_sup_colocado:.2f} cm²`")
 
 with t2:
     st.subheader("Armados Comerciales Factibles")
-    st.caption("Filtra automáticamente combinaciones que cumplen simultáneamente: As_min normativo, As_max sísmico y MR ≥ Mu")
     if not df_optimo.empty:
         st.dataframe(df_optimo, use_container_width=True, hide_index=True)
-        mejor = df_optimo.iloc[0]
-        st.success(f"🏆 **Opción Óptima (Más Ligera):** `{mejor['Armado Propuesto']}` con un peso de **{mejor['Peso (kg/m)']} kg/m**")
-    else:
-        st.warning("⚠️ Ningún armado simple (de 1 a 4 varillas idénticas) logra cubrir la demanda sísmica y mecánica. Aumenta la sección (b x h) o el f'c.")
+        st.success(f"🏆 **Opción Óptima (Más Ligera):** `{df_optimo.iloc[0]['Armado Propuesto']}` ({df_optimo.iloc[0]['Peso (kg/m)']} kg/m)")
+    else: st.warning("Ningún armado simple cubre la demanda. Aumenta la sección (b x h).")
 
 with t3:
     if excepcion_133: st.info("💡 **Excepción 1.33Mu Activa:** Cuantía menor al mínimo permitida por sobreresistencia.")
